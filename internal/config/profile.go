@@ -22,7 +22,15 @@ type Profile struct {
 	Persistence string          `yaml:"persistence"`
 	GPU         GPUConfig       `yaml:"gpu"`
 	Mounts      []MountConfig   `yaml:"mounts,omitempty"`
+	Watchdog    WatchdogConfig  `yaml:"watchdog,omitempty"`
 	Metadata    Metadata        `yaml:"metadata,omitempty"`
+}
+
+// WatchdogConfig configures the in-sandbox monitor. It is optional: an empty or
+// "off" mode disables it. Strictness tunes how readily enforce mode kills.
+type WatchdogConfig struct {
+	Mode       string `yaml:"mode,omitempty"`       // off | observe | enforce
+	Strictness string `yaml:"strictness,omitempty"` // low | medium | high
 }
 
 type AgentConfig struct {
@@ -178,6 +186,17 @@ func (p *Profile) Validate() error {
 
 	if p.GPU.Enabled {
 		return fmt.Errorf("gpu passthrough is not implemented yet; set gpu.enabled to false")
+	}
+
+	switch p.Watchdog.Mode {
+	case "", "off", "observe", "enforce":
+	default:
+		return fmt.Errorf("invalid watchdog mode %q (want off, observe or enforce)", p.Watchdog.Mode)
+	}
+	switch p.Watchdog.Strictness {
+	case "", "low", "medium", "high":
+	default:
+		return fmt.Errorf("invalid watchdog strictness %q (want low, medium or high)", p.Watchdog.Strictness)
 	}
 
 	return nil
