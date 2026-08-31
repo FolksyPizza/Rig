@@ -49,13 +49,18 @@ func ttyFlags() []string {
 	return []string{"-i"}
 }
 
-type Runner struct{}
+type Runner struct{ bin string }
 
+// NewRunner selects a Docker-compatible engine (Podman preferred, Docker fallback) so Rig
+// does not depend on Docker. Apple `container` uses a different create/network surface and
+// is driven through internal/provider (lifecycle migration is in progress).
 func NewRunner() (*Runner, error) {
-	if _, err := exec.LookPath("docker"); err != nil {
-		return nil, fmt.Errorf("docker not found in PATH: %w", err)
+	for _, bin := range []string{"podman", "docker"} {
+		if _, err := exec.LookPath(bin); err == nil {
+			return &Runner{bin: bin}, nil
+		}
 	}
-	return &Runner{}, nil
+	return nil, fmt.Errorf("no container engine found in PATH (looked for podman, docker)")
 }
 
 func (r *Runner) Close() {}
@@ -88,7 +93,7 @@ func (r *Runner) Run(ctx context.Context, profile *config.Profile, networkName s
 	if !opts.NewInstance {
 		if existing, ok := r.findReusable(ctx, profile.Name); ok {
 			if !existing.Running {
-				if out, err := exec.CommandContext(ctx, "docker", "start", existing.Name).CombinedOutput(); err != nil {
+				if out, err := exec.CommandContext(ctx, r.bin, "start", existing.Name).CombinedOutput(); err != nil {
 					return fmt.Errorf("start container %s: %s", existing.Name, strings.TrimSpace(string(out)))
 				}
 			}
@@ -118,7 +123,7 @@ func (r *Runner) Run(ctx context.Context, profile *config.Profile, networkName s
 		return r.startAttached(ctx, containerName)
 	}
 
-	if out, err := exec.CommandContext(ctx, "docker", "start", containerName).CombinedOutput(); err != nil {
+	if out, err := exec.CommandContext(ctx, r.bin, "start", containerName).CombinedOutput(); err != nil {
 		return fmt.Errorf("start container %s: %s", containerName, strings.TrimSpace(string(out)))
 	}
 	return r.execInto(ctx, containerName)
@@ -129,7 +134,7 @@ func (r *Runner) Run(ctx context.Context, profile *config.Profile, networkName s
 // overlay2 on xfs with pquota (or btrfs/zfs), which is a minority of hosts;
 // failing the launch outright over an advisory disk cap is not worth it.
 func (r *Runner) create(ctx context.Context, args []string) error {
-	out, err := exec.CommandContext(ctx, "docker", args...).CombinedOutput()
+	out, err := exec.CommandContext(ctx, r.bin, args...).CombinedOutput()
 	if err == nil {
 		return nil
 	}
@@ -140,7 +145,7 @@ func (r *Runner) create(ctx context.Context, args []string) error {
 		if dropped {
 			fmt.Fprintf(os.Stderr,
 				"  Warning: this Docker storage driver does not support per-container size limits; ignoring storage.size.\n")
-			if out2, err2 := exec.CommandContext(ctx, "docker", stripped...).CombinedOutput(); err2 == nil {
+			if out2, err2 := exec.CommandContext(ctx, r.bin, stripped...).CombinedOutput(); err2 == nil {
 				return nil
 			} else {
 				return fmt.Errorf("create container: %s", strings.TrimSpace(string(out2)))
@@ -177,7 +182,7 @@ func (r *Runner) armTimeout(ctx context.Context, containerName string, d time.Du
 		defer timer.Stop()
 		select {
 		case <-timer.C:
-			_ = exec.Command("docker", "stop", containerName).Run()
+			_ = exec.Command(r.bin, "stop", containerName).Run()
 		case <-ctx.Done():
 		}
 	}()
@@ -187,7 +192,7 @@ func (r *Runner) Exec(ctx context.Context, containerName string, command []strin
 	args := append([]string{"exec"}, ttyFlags()...)
 	args = append(args, containerName)
 	args = append(args, command...)
-	cmd := exec.CommandContext(ctx, "docker", args...)
+	cmd := exec.CommandContext(ctx, r.bin, args...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -199,7 +204,7 @@ func (r *Runner) Shell(ctx context.Context, containerName string) error {
 }
 
 func (r *Runner) Stop(ctx context.Context, name string) error {
-	cmd := exec.CommandContext(ctx, "docker", "stop", name)
+	cmd := exec.CommandContext(ctx, r.bin, "stop", name)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
@@ -210,7 +215,7 @@ func (r *Runner) StopAll(ctx context.Context, profileName string) (int, error) {
 	n := 0
 	for _, c := range containers {
 		if c.Running {
-			if err := exec.CommandContext(ctx, "docker", "stop", c.Name).Run(); err != nil {
+			if err := exec.CommandContext(ctx, r.bin, "stop", c.Name).Run(); err != nil {
 				return n, fmt.Errorf("stop %s: %w", c.Name, err)
 			}
 			n++
@@ -220,8 +225,8 @@ func (r *Runner) StopAll(ctx context.Context, profileName string) (int, error) {
 }
 
 func (r *Runner) Destroy(ctx context.Context, name string) error {
-	_ = exec.CommandContext(ctx, "docker", "stop", name).Run()
-	cmd := exec.CommandContext(ctx, "docker", "rm", "-f", name)
+	_ = exec.CommandContext(ctx, r.bin, "stop", name).Run()
+	cmd := exec.CommandContext(ctx, r.bin, "rm", "-f", name)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
@@ -231,8 +236,8 @@ func (r *Runner) DestroyAll(ctx context.Context, profileName string) (int, error
 	containers := r.ListByProfile(ctx, profileName)
 	n := 0
 	for _, c := range containers {
-		_ = exec.CommandContext(ctx, "docker", "stop", c.Name).Run()
-		if err := exec.CommandContext(ctx, "docker", "rm", "-f", c.Name).Run(); err != nil {
+		_ = exec.CommandContext(ctx, r.bin, "stop", c.Name).Run()
+		if err := exec.CommandContext(ctx, r.bin, "rm", "-f", c.Name).Run(); err != nil {
 			return n, fmt.Errorf("remove %s: %w", c.Name, err)
 		}
 		n++
@@ -249,21 +254,21 @@ func (r *Runner) Logs(ctx context.Context, containerName string, follow bool, ta
 		args = append(args, "--tail", tail)
 	}
 	args = append(args, containerName)
-	cmd := exec.CommandContext(ctx, "docker", args...)
+	cmd := exec.CommandContext(ctx, r.bin, args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
 }
 
 func (r *Runner) CopyFromContainer(ctx context.Context, containerName, srcPath, dstPath string) error {
-	cmd := exec.CommandContext(ctx, "docker", "cp", containerName+":"+srcPath, dstPath)
+	cmd := exec.CommandContext(ctx, r.bin, "cp", containerName+":"+srcPath, dstPath)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
 }
 
 func (r *Runner) CopyToContainer(ctx context.Context, containerName, srcPath, dstPath string) error {
-	cmd := exec.CommandContext(ctx, "docker", "cp", srcPath, containerName+":"+dstPath)
+	cmd := exec.CommandContext(ctx, r.bin, "cp", srcPath, containerName+":"+dstPath)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
@@ -298,7 +303,7 @@ func (r *Runner) list(ctx context.Context, labelFilters ...string) []ContainerIn
 	args = append(args, "--format",
 		`{"name":"{{.Names}}","image":"{{.Image}}","status":"{{.Status}}","state":"{{.State}}","created":"{{.CreatedAt}}","ports":"{{.Ports}}","labels":"{{.Labels}}"}`)
 
-	out, err := exec.CommandContext(ctx, "docker", args...).Output()
+	out, err := exec.CommandContext(ctx, r.bin, args...).Output()
 	if err != nil {
 		return nil
 	}
@@ -344,7 +349,7 @@ func profileFromLabels(labels string) string {
 }
 
 func (r *Runner) ContainerStats(ctx context.Context, containerName string) (string, error) {
-	cmd := exec.CommandContext(ctx, "docker", "stats", "--no-stream",
+	cmd := exec.CommandContext(ctx, r.bin, "stats", "--no-stream",
 		"--format", "CPU: {{.CPUPerc}}  Mem: {{.MemUsage}}  Net: {{.NetIO}}  PIDs: {{.PIDs}}",
 		containerName,
 	)
@@ -356,36 +361,36 @@ func (r *Runner) ContainerStats(ctx context.Context, containerName string) (stri
 }
 
 func (r *Runner) Rename(ctx context.Context, oldName, newName string) error {
-	cmd := exec.CommandContext(ctx, "docker", "rename", oldName, newName)
+	cmd := exec.CommandContext(ctx, r.bin, "rename", oldName, newName)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
 }
 
 func (r *Runner) Pause(ctx context.Context, containerName string) error {
-	return exec.CommandContext(ctx, "docker", "pause", containerName).Run()
+	return exec.CommandContext(ctx, r.bin, "pause", containerName).Run()
 }
 
 func (r *Runner) Unpause(ctx context.Context, containerName string) error {
-	return exec.CommandContext(ctx, "docker", "unpause", containerName).Run()
+	return exec.CommandContext(ctx, r.bin, "unpause", containerName).Run()
 }
 
 func (r *Runner) Commit(ctx context.Context, containerName, tag string) error {
-	cmd := exec.CommandContext(ctx, "docker", "commit", containerName, tag)
+	cmd := exec.CommandContext(ctx, r.bin, "commit", containerName, tag)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
 }
 
 func (r *Runner) Top(ctx context.Context, containerName string) error {
-	cmd := exec.CommandContext(ctx, "docker", "top", containerName, "-eo", "pid,ppid,user,%cpu,%mem,etime,comm")
+	cmd := exec.CommandContext(ctx, r.bin, "top", containerName, "-eo", "pid,ppid,user,%cpu,%mem,etime,comm")
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
 }
 
 func (r *Runner) Diff(ctx context.Context, containerName string) error {
-	cmd := exec.CommandContext(ctx, "docker", "diff", containerName)
+	cmd := exec.CommandContext(ctx, r.bin, "diff", containerName)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
@@ -507,7 +512,7 @@ func writeEnvFile(profile *config.Profile) (string, func(), error) {
 func (r *Runner) execInto(ctx context.Context, containerName string) error {
 	args := append([]string{"exec"}, ttyFlags()...)
 	args = append(args, containerName, "/bin/bash", "-l")
-	cmd := exec.CommandContext(ctx, "docker", args...)
+	cmd := exec.CommandContext(ctx, r.bin, args...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -515,7 +520,7 @@ func (r *Runner) execInto(ctx context.Context, containerName string) error {
 }
 
 func (r *Runner) startAttached(ctx context.Context, containerName string) error {
-	cmd := exec.CommandContext(ctx, "docker", "start", "-ai", containerName)
+	cmd := exec.CommandContext(ctx, r.bin, "start", "-ai", containerName)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -524,7 +529,7 @@ func (r *Runner) startAttached(ctx context.Context, containerName string) error 
 
 // ProfileOf returns the profile a container was created from, via its label.
 func (r *Runner) ProfileOf(ctx context.Context, containerName string) (string, error) {
-	out, err := exec.CommandContext(ctx, "docker", "inspect",
+	out, err := exec.CommandContext(ctx, r.bin, "inspect",
 		"-f", `{{index .Config.Labels "`+LabelProfile+`"}}`, containerName).Output()
 	if err != nil {
 		return "", fmt.Errorf("inspect %s: %w", containerName, err)
@@ -537,7 +542,7 @@ func (r *Runner) ProfileOf(ctx context.Context, containerName string) (string, e
 }
 
 func (r *Runner) containerExists(ctx context.Context, name string) bool {
-	return exec.CommandContext(ctx, "docker", "inspect", name).Run() == nil
+	return exec.CommandContext(ctx, r.bin, "inspect", name).Run() == nil
 }
 
 // findReusable returns an existing sandbox for the profile, preferring one
