@@ -10,14 +10,12 @@ import (
 	"text/tabwriter"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
 	"github.com/spf13/cobra"
 
 	"github.com/FolksyPizza/rig/internal/agents"
 	"github.com/FolksyPizza/rig/internal/config"
 	"github.com/FolksyPizza/rig/internal/container"
 	"github.com/FolksyPizza/rig/internal/security"
-	"github.com/FolksyPizza/rig/internal/tui"
 )
 
 var version = "dev"
@@ -28,9 +26,11 @@ func main() {
 		Short: "Containerized AI agent sandbox",
 		Long: `Rig creates isolated, containerized sandboxes for AI agents.
 
-Launch the interactive setup wizard with just 'rig', or use subcommands
-to manage profiles, containers, and data.`,
-		RunE:          runTUI,
+Common flow:
+  rig new work --from claude-secure   create a sandbox named "work"
+  rig run work                        build if needed, then enter it
+  rig ls                              list your sandboxes
+  rig rm work                         remove its containers (add --all to delete it)`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
@@ -46,6 +46,7 @@ to manage profiles, containers, and data.`,
 		shellCmd(),
 		execCmd(),
 		stopCmd(),
+		rmCmd(),
 		destroyCmd(),
 		deleteCmd(),
 		logsCmd(),
@@ -73,33 +74,6 @@ to manage profiles, containers, and data.`,
 // the resources it created instead of leaving a proxy and networks behind.
 func signalContext() (context.Context, context.CancelFunc) {
 	return signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-}
-
-// ── TUI ──────────────────────────────────────────────────────────────
-
-func runTUI(cmd *cobra.Command, args []string) error {
-	store, err := config.NewStore()
-	if err != nil {
-		return err
-	}
-
-	app := tui.NewApp(store)
-	p := tea.NewProgram(app, tea.WithAltScreen())
-	finalModel, err := p.Run()
-	if err != nil {
-		return err
-	}
-
-	tuiApp, ok := finalModel.(*tui.App)
-	if !ok {
-		return nil
-	}
-
-	profile := tuiApp.Profile()
-	if profile == nil || profile.Name == "" {
-		return nil
-	}
-	return enterSandbox(profile, container.RunOptions{})
 }
 
 // enterSandbox brings up a profile's network, then its container.
@@ -172,56 +146,127 @@ func resolve(ctx context.Context, r *container.Runner, name string) (string, err
 // ── Lifecycle commands ───────────────────────────────────────────────
 
 func newCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "new",
-		Short: "Create a new sandbox (launches the TUI wizard)",
-		RunE:  runTUI,
+	cmd := &cobra.Command{
+		Use:   "new <name>",
+		Short: "Create a sandbox from a template",
+		Long: `Create a saved sandbox named <name> from a template.
+
+  rig new work --from claude-secure    create "work" from the claude-secure template
+  rig new work --from minimal --run    create it and enter it right away
+
+See 'rig template list' for the available templates.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			from, _ := cmd.Flags().GetString("from")
+			if from == "" {
+				return fmt.Errorf("choose a template with --from (see 'rig template list')")
+			}
+			force, _ := cmd.Flags().GetBool("force")
+			launch, _ := cmd.Flags().GetBool("run")
+
+			store, err := config.NewStore()
+			if err != nil {
+				return err
+			}
+			profile, err := createFromTemplate(store, from, args[0], force)
+			if err != nil {
+				return err
+			}
+			fmt.Printf("  Created sandbox %q from template %q\n", profile.Name, from)
+			if launch {
+				return buildAndEnter(profile, container.RunOptions{})
+			}
+			fmt.Printf("  Run 'rig run %s' to launch it.\n", profile.Name)
+			return nil
+		},
 	}
+	cmd.Flags().String("from", "", "Template to create the sandbox from (see 'rig template list')")
+	cmd.Flags().Bool("run", false, "Launch the sandbox immediately after creating it")
+	cmd.Flags().Bool("force", false, "Overwrite an existing sandbox with the same name")
+	return cmd
+}
+
+// createFromTemplate instantiates a saved sandbox from a built-in template.
+func createFromTemplate(store *config.Store, templateName, name string, force bool) (*config.Profile, error) {
+	tmpl, ok := config.GetTemplate(templateName)
+	if !ok {
+		return nil, fmt.Errorf("template %q not found (see 'rig template list')", templateName)
+	}
+	profile := tmpl.Profile
+	profile.Name = tmpl.Name
+	if name != "" {
+		profile.Name = name
+	}
+	if store.Exists(profile.Name) && !force {
+		return nil, fmt.Errorf("sandbox %q already exists; pass --force to overwrite it", profile.Name)
+	}
+	profile.Metadata.CreatedAt = time.Now().UTC()
+	if err := store.Save(&profile); err != nil {
+		return nil, err
+	}
+	return &profile, nil
+}
+
+// buildAndEnter builds a sandbox's image if it is missing, then enters it.
+func buildAndEnter(profile *config.Profile, opts container.RunOptions) error {
+	ctx, cancel := signalContext()
+	defer cancel()
+
+	builder, err := container.NewBuilder()
+	if err != nil {
+		return err
+	}
+	defer builder.Close()
+
+	if !builder.ImageExists(ctx, profile.ImageTag()) {
+		fmt.Printf("  Building image %s...\n", profile.ImageTag())
+		if err := builder.Build(ctx, profile, func(e container.BuildEvent) {
+			fmt.Println(e.Stream)
+		}); err != nil {
+			return err
+		}
+	}
+	return enterSandbox(profile, opts)
 }
 
 func runCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "run <profile>",
-		Short: "Launch a sandbox from a saved profile",
-		Long: `Build the image if needed, then enter the sandbox.
+		Use:   "run <name>",
+		Short: "Build if needed and enter a sandbox",
+		Long: `Launch a saved sandbox, building its image on first use.
 
-By default an existing instance of the profile is reused: a running one is
-re-entered, a stopped one is restarted. Pass --new to start an additional
-instance alongside it.`,
+If the sandbox does not exist yet, pass --from <template> to create it first.
+By default an existing instance is reused: a running one is re-entered, a stopped
+one is restarted. Pass --new to start an additional instance alongside it.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			store, err := config.NewStore()
 			if err != nil {
 				return err
 			}
+			name := args[0]
+			from, _ := cmd.Flags().GetString("from")
 
-			profile, err := store.Load(args[0])
-			if err != nil {
-				return fmt.Errorf("profile %q not found: %w", args[0], err)
+			var profile *config.Profile
+			switch {
+			case store.Exists(name):
+				profile, err = store.Load(name)
+				if err != nil {
+					return fmt.Errorf("sandbox %q could not be loaded: %w", name, err)
+				}
+			case from != "":
+				profile, err = createFromTemplate(store, from, name, false)
+				if err != nil {
+					return err
+				}
+				fmt.Printf("  Created sandbox %q from template %q\n", name, from)
+			default:
+				return fmt.Errorf("sandbox %q not found; create it with 'rig new %s --from <template>' or pass --from here", name, name)
 			}
 
 			timeout, _ := cmd.Flags().GetDuration("timeout")
 			newInstance, _ := cmd.Flags().GetBool("new")
-
-			ctx, cancel := signalContext()
-			defer cancel()
-
-			builder, err := container.NewBuilder()
-			if err != nil {
-				return err
-			}
-			defer builder.Close()
-
-			if !builder.ImageExists(ctx, profile.ImageTag()) {
-				fmt.Printf("  Building image %s...\n", profile.ImageTag())
-				if err := builder.Build(ctx, profile, func(e container.BuildEvent) {
-					fmt.Println(e.Stream)
-				}); err != nil {
-					return err
-				}
-			}
-
-			return enterSandbox(profile, container.RunOptions{
+			return buildAndEnter(profile, container.RunOptions{
 				NewInstance: newInstance,
 				Timeout:     timeout,
 			})
@@ -229,12 +274,13 @@ instance alongside it.`,
 	}
 	cmd.Flags().Duration("timeout", 0, "Auto-stop the sandbox after this duration (e.g. 30m, 2h)")
 	cmd.Flags().Bool("new", false, "Start an additional instance instead of reusing an existing one")
+	cmd.Flags().String("from", "", "If the sandbox doesn't exist, create it from this template first")
 	return cmd
 }
 
 func buildCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "build <profile>",
+		Use:   "build <name>",
 		Short: "Build a sandbox image without launching it",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -269,8 +315,8 @@ func buildCmd() *cobra.Command {
 
 func stopCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "stop <container|profile>",
-		Short: "Stop a running sandbox",
+		Use:   "stop <container|sandbox>",
+		Short: "Stop a running sandbox without removing it",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			r := mustRunner()
@@ -282,7 +328,7 @@ func stopCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				fmt.Printf("  Stopped %d container(s) for profile %q\n", n, args[0])
+				fmt.Printf("  Stopped %d container(s) for sandbox %q\n", n, args[0])
 				return nil
 			}
 
@@ -303,9 +349,10 @@ func stopCmd() *cobra.Command {
 
 func destroyCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "destroy <container|profile>",
-		Short: "Stop and remove sandbox container(s)",
-		Args:  cobra.ExactArgs(1),
+		Use:    "destroy <container|sandbox>",
+		Short:  "Deprecated: use 'rig rm <name>'",
+		Hidden: true,
+		Args:   cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			r := mustRunner()
 			defer r.Close()
@@ -335,62 +382,97 @@ func destroyCmd() *cobra.Command {
 	return cmd
 }
 
-func deleteCmd() *cobra.Command {
+// rmCmd is the single teardown verb: by default it removes a sandbox's
+// containers; with --all it also deletes the saved sandbox, its image, and
+// network. It replaces the old stop/destroy/delete split.
+func rmCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "delete <profile>",
-		Short: "Delete a profile, its image, and all its containers",
-		Args:  cobra.ExactArgs(1),
+		Use:   "rm <name>",
+		Short: "Remove a sandbox's containers (with --all, delete the sandbox too)",
+		Long: `Remove the containers belonging to a sandbox.
+
+  rig rm work           remove work's containers, keep the saved sandbox
+  rig rm work --all     also delete the saved sandbox, its image, and network`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			store, err := config.NewStore()
+			if all, _ := cmd.Flags().GetBool("all"); all {
+				return deleteSandbox(cmd, args[0])
+			}
+			r := mustRunner()
+			defer r.Close()
+			n, err := r.DestroyAll(context.Background(), args[0])
 			if err != nil {
 				return err
 			}
-			name := args[0]
-
-			if !store.Exists(name) {
-				return fmt.Errorf("profile %q not found", name)
-			}
-
-			yes, _ := cmd.Flags().GetBool("yes")
-			if !yes {
-				fmt.Printf("  This deletes profile %q, its image, and all of its containers.\n", name)
-				fmt.Printf("  Re-run with --yes to confirm.\n")
-				return nil
-			}
-
-			ctx := context.Background()
-			if r, err := container.NewRunner(); err == nil {
-				defer r.Close()
-				if _, err := r.DestroyAll(ctx, name); err != nil {
-					return err
-				}
-			}
-
-			// Load before deleting so the image tag is known; a profile that
-			// no longer parses still gets its file removed below.
-			if profile, err := store.Load(name); err == nil {
-				if b, err := container.NewBuilder(); err == nil {
-					defer b.Close()
-					if err := b.RemoveImage(ctx, profile.ImageTag()); err != nil {
-						fmt.Fprintf(os.Stderr, "  Warning: %v\n", err)
-					}
-				}
-			}
-
-			if nm, err := container.NewNetworkManager(); err == nil {
-				nm.Teardown(ctx, name)
-				nm.Close()
-			}
-
-			if err := store.Delete(name); err != nil {
-				return fmt.Errorf("delete profile: %w", err)
-			}
-			fmt.Printf("  Deleted profile %q and all associated resources\n", name)
+			fmt.Printf("  Removed %d container(s) for sandbox %q\n", n, args[0])
 			return nil
+		},
+	}
+	cmd.Flags().BoolP("all", "a", false, "Also delete the saved sandbox, its image, and network")
+	cmd.Flags().Bool("yes", false, "Skip the confirmation prompt when using --all")
+	return cmd
+}
+
+// deleteCmd is retained as a hidden alias for `rm --all`.
+func deleteCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:    "delete <name>",
+		Short:  "Deprecated: use 'rig rm <name> --all'",
+		Hidden: true,
+		Args:   cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return deleteSandbox(cmd, args[0])
 		},
 	}
 	cmd.Flags().Bool("yes", false, "Skip the confirmation prompt")
 	return cmd
+}
+
+// deleteSandbox tears down every resource a sandbox owns. `cmd` supplies the
+// --yes flag. A sandbox whose file no longer parses is still removed.
+func deleteSandbox(cmd *cobra.Command, name string) error {
+	store, err := config.NewStore()
+	if err != nil {
+		return err
+	}
+	if !store.Exists(name) {
+		return fmt.Errorf("sandbox %q not found", name)
+	}
+
+	yes, _ := cmd.Flags().GetBool("yes")
+	if !yes {
+		fmt.Printf("  This deletes sandbox %q, its image, and all of its containers.\n", name)
+		fmt.Printf("  Re-run with --yes to confirm.\n")
+		return nil
+	}
+
+	ctx := context.Background()
+	if r, err := container.NewRunner(); err == nil {
+		defer r.Close()
+		if _, err := r.DestroyAll(ctx, name); err != nil {
+			return err
+		}
+	}
+
+	if profile, err := store.Load(name); err == nil {
+		if b, err := container.NewBuilder(); err == nil {
+			defer b.Close()
+			if err := b.RemoveImage(ctx, profile.ImageTag()); err != nil {
+				fmt.Fprintf(os.Stderr, "  Warning: %v\n", err)
+			}
+		}
+	}
+
+	if nm, err := container.NewNetworkManager(); err == nil {
+		nm.Teardown(ctx, name)
+		nm.Close()
+	}
+
+	if err := store.Delete(name); err != nil {
+		return fmt.Errorf("delete sandbox: %w", err)
+	}
+	fmt.Printf("  Deleted sandbox %q and all associated resources\n", name)
+	return nil
 }
 
 // ── Interaction commands ─────────────────────────────────────────────
@@ -573,8 +655,8 @@ func splitContainerRef(s string) (containerRef, bool) {
 func listCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:     "list",
-		Aliases: []string{"ls", "profiles"},
-		Short:   "List saved profiles",
+		Aliases: []string{"ls", "sandboxes"},
+		Short:   "List saved sandboxes",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			store, err := config.NewStore()
 			if err != nil {
@@ -585,12 +667,12 @@ func listCmd() *cobra.Command {
 				return err
 			}
 			if len(profiles) == 0 {
-				fmt.Println("  No profiles found. Run 'rig' to create one.")
+				fmt.Println("  No sandboxes yet. Create one with 'rig new <name> --from <template>'.")
 				return nil
 			}
 
 			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-			fmt.Fprintln(w, "PROFILE\tAGENTS\tNETWORK\tCPU\tMEMORY\tMODE")
+			fmt.Fprintln(w, "SANDBOX\tAGENTS\tNETWORK\tCPU\tMEMORY\tMODE")
 			for _, name := range profiles {
 				p, err := store.Load(name)
 				if err != nil {
@@ -635,8 +717,8 @@ func psCmd() *cobra.Command {
 
 func inspectCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "inspect <profile>",
-		Short: "Show the generated Dockerfile for a profile",
+		Use:   "inspect <name>",
+		Short: "Show the generated Dockerfile for a sandbox",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			store, err := config.NewStore()
@@ -840,9 +922,9 @@ func renameCmd() *cobra.Command {
 
 func exportCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "export <profile> [file]",
-		Short: "Export a profile to a YAML file for sharing",
-		Long:  "Exports the profile with ${VAR} references intact, so no secret value is written.",
+		Use:   "export <name> [file]",
+		Short: "Export a sandbox to a YAML file for sharing",
+		Long:  "Exports the sandbox with ${VAR} references intact, so no secret value is written.",
 		Args:  cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			store, err := config.NewStore()
@@ -861,7 +943,7 @@ func exportCmd() *cobra.Command {
 			if err := store.Export(profile, outFile); err != nil {
 				return err
 			}
-			fmt.Printf("  Exported profile to %s\n", outFile)
+			fmt.Printf("  Exported sandbox to %s\n", outFile)
 			return nil
 		},
 	}
@@ -870,11 +952,11 @@ func exportCmd() *cobra.Command {
 func importCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "import <file>",
-		Short: "Import a profile from a YAML file",
-		Long: `Import a shared profile.
+		Short: "Import a sandbox from a YAML file",
+		Long: `Import a shared sandbox.
 
 Imported files are treated as untrusted: every field is validated, and a
-profile that requests a host mount of something like the Docker socket is
+sandbox that requests a host mount of something like the Docker socket is
 rejected rather than imported.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -886,7 +968,7 @@ rejected rather than imported.`,
 			if err != nil {
 				return err
 			}
-			fmt.Printf("  Imported profile %q\n", profile.Name)
+			fmt.Printf("  Imported sandbox %q\n", profile.Name)
 			return nil
 		},
 	}
@@ -919,42 +1001,30 @@ func templateCmd() *cobra.Command {
 	})
 
 	useCmd := &cobra.Command{
-		Use:   "use <template> [profile-name]",
-		Short: "Create a profile from a template",
-		Args:  cobra.RangeArgs(1, 2),
+		Use:    "use <template> [name]",
+		Short:  "Deprecated: use 'rig new <name> --from <template>'",
+		Hidden: true,
+		Args:   cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			store, err := config.NewStore()
 			if err != nil {
 				return err
 			}
-
-			tmpl, ok := config.GetTemplate(args[0])
-			if !ok {
-				return fmt.Errorf("template %q not found (see 'rig template list')", args[0])
-			}
-
-			profile := tmpl.Profile
-			profile.Name = tmpl.Name
+			name := ""
 			if len(args) > 1 {
-				profile.Name = args[1]
+				name = args[1]
 			}
-
-			if store.Exists(profile.Name) {
-				if force, _ := cmd.Flags().GetBool("force"); !force {
-					return fmt.Errorf("profile %q already exists; pass --force to overwrite it", profile.Name)
-				}
-			}
-
-			profile.Metadata.CreatedAt = time.Now().UTC()
-			if err := store.Save(&profile); err != nil {
+			force, _ := cmd.Flags().GetBool("force")
+			profile, err := createFromTemplate(store, args[0], name, force)
+			if err != nil {
 				return err
 			}
-			fmt.Printf("  Created profile %q from template %q\n", profile.Name, tmpl.Name)
+			fmt.Printf("  Created sandbox %q from template %q\n", profile.Name, args[0])
 			fmt.Printf("  Run 'rig run %s' to launch it.\n", profile.Name)
 			return nil
 		},
 	}
-	useCmd.Flags().Bool("force", false, "Overwrite an existing profile with the same name")
+	useCmd.Flags().Bool("force", false, "Overwrite an existing sandbox with the same name")
 	cmd.AddCommand(useCmd)
 
 	cmd.AddCommand(&cobra.Command{
