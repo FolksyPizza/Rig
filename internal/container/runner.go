@@ -15,6 +15,7 @@ import (
 	"github.com/mattn/go-isatty"
 
 	"github.com/FolksyPizza/rig/internal/config"
+	"github.com/FolksyPizza/rig/internal/provider"
 )
 
 // Labels Rig stamps on every container it creates. Lookups filter on these
@@ -49,18 +50,26 @@ func ttyFlags() []string {
 	return []string{"-i"}
 }
 
-type Runner struct{ bin string }
+// Runner drives a container engine. kind is "" for a Docker-compatible engine
+// (docker/podman, identical CLI) or "apple" for Apple's native `container`, which
+// takes a different create/list surface.
+type Runner struct {
+	bin  string
+	kind string
+}
 
-// NewRunner selects a Docker-compatible engine (Podman preferred, Docker fallback) so Rig
-// does not depend on Docker. Apple `container` uses a different create/network surface and
-// is driven through internal/provider (lifecycle migration is in progress).
+// NewRunner selects the platform's container engine: Apple `container` on macOS, Podman on
+// Linux/Windows, Docker as a compatible fallback. Rig no longer depends on Docker.
 func NewRunner() (*Runner, error) {
-	for _, bin := range []string{"podman", "docker"} {
-		if _, err := exec.LookPath(bin); err == nil {
-			return &Runner{bin: bin}, nil
-		}
+	p := provider.Detect()
+	if !p.Available() {
+		return nil, fmt.Errorf("no container engine found (looked for %s and fallbacks)", p.Name())
 	}
-	return nil, fmt.Errorf("no container engine found in PATH (looked for podman, docker)")
+	kind := ""
+	if p.Name() == "apple" {
+		kind = "apple"
+	}
+	return &Runner{bin: p.Bin(), kind: kind}, nil
 }
 
 func (r *Runner) Close() {}
@@ -296,6 +305,9 @@ func (r *Runner) ListByProfile(ctx context.Context, profileName string) []Contai
 }
 
 func (r *Runner) list(ctx context.Context, labelFilters ...string) []ContainerInfo {
+	if r.kind == "apple" {
+		return r.appleList(ctx, labelFilters...)
+	}
 	args := []string{"ps", "-a"}
 	for _, f := range labelFilters {
 		args = append(args, "--filter", "label="+f)
@@ -396,8 +408,11 @@ func (r *Runner) Diff(ctx context.Context, containerName string) error {
 	return cmd.Run()
 }
 
-// buildCreateArgs assembles the `docker create` invocation for a sandbox.
+// buildCreateArgs assembles the create invocation for a sandbox, in the engine's dialect.
 func (r *Runner) buildCreateArgs(profile *config.Profile, name, networkName, envFile string, ephemeral bool) []string {
+	if r.kind == "apple" {
+		return appleCreateArgs(profile, name, networkName, envFile, ephemeral)
+	}
 	args := []string{
 		"create",
 		"--name", name,
@@ -529,6 +544,14 @@ func (r *Runner) startAttached(ctx context.Context, containerName string) error 
 
 // ProfileOf returns the profile a container was created from, via its label.
 func (r *Runner) ProfileOf(ctx context.Context, containerName string) (string, error) {
+	if r.kind == "apple" {
+		for _, c := range r.appleList(ctx, LabelRole+"="+RoleSandbox) {
+			if c.Name == containerName && c.Profile != "" {
+				return c.Profile, nil
+			}
+		}
+		return "", fmt.Errorf("container %s has no %s label", containerName, LabelProfile)
+	}
 	out, err := exec.CommandContext(ctx, r.bin, "inspect",
 		"-f", `{{index .Config.Labels "`+LabelProfile+`"}}`, containerName).Output()
 	if err != nil {

@@ -10,19 +10,28 @@ import (
 	"path/filepath"
 
 	"github.com/FolksyPizza/rig/internal/config"
+	"github.com/FolksyPizza/rig/internal/provider"
 )
 
 type BuildEvent struct {
 	Stream string
 }
 
-type Builder struct{}
+type Builder struct {
+	bin  string
+	kind string
+}
 
 func NewBuilder() (*Builder, error) {
-	if _, err := exec.LookPath("docker"); err != nil {
-		return nil, fmt.Errorf("docker not found in PATH: %w", err)
+	p := provider.Detect()
+	if !p.Available() {
+		return nil, fmt.Errorf("no container engine found (looked for %s and fallbacks)", p.Name())
 	}
-	return &Builder{}, nil
+	kind := ""
+	if p.Name() == "apple" {
+		kind = "apple"
+	}
+	return &Builder{bin: p.Bin(), kind: kind}, nil
 }
 
 func (b *Builder) Close() {}
@@ -62,7 +71,7 @@ func (b *Builder) BuildWithOpts(ctx context.Context, profile *config.Profile, no
 	// unreadable once captured; plain progress gives line-oriented output.
 	args = append(args, "--progress=plain", tmpDir)
 
-	cmd := exec.CommandContext(ctx, "docker", args...)
+	cmd := exec.CommandContext(ctx, b.bin, args...)
 
 	pipeRead, pipeWrite := io.Pipe()
 	cmd.Stdout = pipeWrite
@@ -99,7 +108,8 @@ func (b *Builder) BuildWithOpts(ctx context.Context, profile *config.Profile, no
 }
 
 func (b *Builder) ImageExists(ctx context.Context, tag string) bool {
-	return exec.CommandContext(ctx, "docker", "image", "inspect", tag).Run() == nil
+	// `image inspect` is supported by docker, podman, and Apple `container` alike.
+	return exec.CommandContext(ctx, b.bin, "image", "inspect", tag).Run() == nil
 }
 
 // RemoveImage deletes a profile's image. A missing image is not an error.
@@ -107,8 +117,12 @@ func (b *Builder) RemoveImage(ctx context.Context, tag string) error {
 	if !b.ImageExists(ctx, tag) {
 		return nil
 	}
-	out, err := exec.CommandContext(ctx, "docker", "rmi", "-f", tag).CombinedOutput()
-	if err != nil {
+	// Apple uses `image rm`; docker/podman use `rmi -f`.
+	rm := exec.CommandContext(ctx, b.bin, "rmi", "-f", tag)
+	if b.kind == "apple" {
+		rm = exec.CommandContext(ctx, b.bin, "image", "rm", tag)
+	}
+	if out, err := rm.CombinedOutput(); err != nil {
 		return fmt.Errorf("remove image %s: %s", tag, out)
 	}
 	return nil

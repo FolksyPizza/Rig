@@ -171,6 +171,34 @@ func TestBuildCreateArgsHardening(t *testing.T) {
 	}
 }
 
+func TestAppleCreateArgs(t *testing.T) {
+	args := appleCreateArgs(testProfile(), "rig-demo", "", "", false)
+	if args[0] != "create" {
+		t.Fatal("apple args must start with create")
+	}
+	if !argsContainPair(args, "-m", "4096M") {
+		t.Error("missing apple memory limit")
+	}
+	if !argsContainPair(args, "-c", "2.00") {
+		t.Error("missing apple cpu limit")
+	}
+	if !argsContainPair(args, "--cap-drop", "ALL") {
+		t.Error("missing cap-drop")
+	}
+	if !argsContainPair(args, "--label", LabelProfile+"=demo") {
+		t.Error("missing profile label")
+	}
+	// Flags Apple `container` does not support must not leak in.
+	for _, bad := range []string{"--pids-limit=512", "--security-opt", "--memory-swap=4096m", "--storage-opt"} {
+		if argsContain(args, bad) {
+			t.Errorf("apple args should not contain docker-only flag %q", bad)
+		}
+	}
+	if args[len(args)-2] != "sleep" || args[len(args)-1] != "infinity" {
+		t.Error("persistent apple sandbox should run a long-lived init")
+	}
+}
+
 func TestBuildCreateArgsNetworkModes(t *testing.T) {
 	r := &Runner{}
 

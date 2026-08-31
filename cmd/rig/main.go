@@ -15,6 +15,7 @@ import (
 	"github.com/FolksyPizza/rig/internal/agents"
 	"github.com/FolksyPizza/rig/internal/config"
 	"github.com/FolksyPizza/rig/internal/container"
+	"github.com/FolksyPizza/rig/internal/provider"
 	"github.com/FolksyPizza/rig/internal/security"
 )
 
@@ -93,6 +94,11 @@ func enterSandbox(profile *config.Profile, opts container.RunOptions) error {
 
 	var networkName string
 	if profile.Network.Mode == "allowlist" {
+		// The allowlist relies on a Squid sidecar on a Docker internal network; that model
+		// is not yet mapped to Apple's native runtime.
+		if provider.Detect().Name() == "apple" {
+			return fmt.Errorf("network allowlist is not yet supported on the native macOS runtime; use network mode 'unrestricted' or 'none', or install podman/docker")
+		}
 		nm, err := container.NewNetworkManager()
 		if err != nil {
 			return err
