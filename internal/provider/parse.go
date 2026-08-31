@@ -80,50 +80,45 @@ func lastNonEmpty(s string) string {
 
 // --- Apple `container` JSON (schema is loose across versions; parse defensively) ---
 
+// Apple `container ls --format json` nests the name under configuration.id.
 func parseAppleNames(data []byte) []string {
-	var items []map[string]any
+	var items []struct {
+		Configuration struct {
+			ID string `json:"id"`
+		} `json:"configuration"`
+		ID string `json:"id"`
+	}
 	if json.Unmarshal(data, &items) != nil {
 		return nil
 	}
 	var names []string
 	for _, it := range items {
-		for _, key := range []string{"name", "Name", "id", "ID"} {
-			if v, ok := it[key].(string); ok && v != "" {
-				names = append(names, v)
-				break
-			}
+		if it.Configuration.ID != "" {
+			names = append(names, it.Configuration.ID)
+		} else if it.ID != "" {
+			names = append(names, it.ID)
 		}
 	}
 	return names
 }
 
+// Apple `container stats --format json` returns an array of samples with explicit
+// byte/count fields (memoryUsageBytes, memoryLimitBytes, numProcesses).
 func parseAppleStats(data []byte) (Stats, error) {
-	// Accept either a single object or a one-element array.
-	var obj map[string]any
-	if json.Unmarshal(data, &obj) != nil {
-		var arr []map[string]any
-		if json.Unmarshal(data, &arr) != nil || len(arr) == 0 {
-			return Stats{}, fmt.Errorf("unrecognized apple stats json")
-		}
-		obj = arr[0]
+	var arr []struct {
+		ID               string  `json:"id"`
+		MemoryUsageBytes int64   `json:"memoryUsageBytes"`
+		MemoryLimitBytes int64   `json:"memoryLimitBytes"`
+		NumProcesses     int     `json:"numProcesses"`
+		CPUUsageUsec     float64 `json:"cpuUsageUsec"`
 	}
-	num := func(keys ...string) float64 {
-		for _, k := range keys {
-			switch v := obj[k].(type) {
-			case float64:
-				return v
-			case string:
-				if f, err := strconv.ParseFloat(strings.TrimSuffix(v, "%"), 64); err == nil {
-					return f
-				}
-			}
-		}
-		return 0
+	if err := json.Unmarshal(data, &arr); err != nil || len(arr) == 0 {
+		return Stats{}, fmt.Errorf("unrecognized apple stats json: %w", err)
 	}
+	s := arr[0]
 	return Stats{
-		CPUPercent: num("cpu", "cpu_percent", "CPUPercent"),
-		MemBytes:   int64(num("memory", "mem_bytes", "MemoryBytes")),
-		MemLimit:   int64(num("memory_limit", "mem_limit", "MemoryLimit")),
-		PIDs:       int(num("pids", "PIDs")),
+		MemBytes: s.MemoryUsageBytes,
+		MemLimit: s.MemoryLimitBytes,
+		PIDs:     s.NumProcesses,
 	}, nil
 }

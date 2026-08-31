@@ -59,8 +59,18 @@ func TestDetectPrefersNativePerOS(t *testing.T) {
 }
 
 func TestParseAppleNames(t *testing.T) {
-	names := parseAppleNames([]byte(`[{"name":"rig-a"},{"id":"rig-b"}]`))
+	names := parseAppleNames([]byte(`[{"configuration":{"id":"rig-a"}},{"configuration":{"id":"rig-b"}}]`))
 	if len(names) != 2 || names[0] != "rig-a" || names[1] != "rig-b" {
 		t.Errorf("names = %v", names)
+	}
+}
+
+func TestParseAppleStats(t *testing.T) {
+	s, err := parseAppleStats([]byte(`[{"id":"x","memoryUsageBytes":4317184,"memoryLimitBytes":1073741824,"numProcesses":3}]`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.MemBytes != 4317184 || s.MemLimit != 1073741824 || s.PIDs != 3 {
+		t.Errorf("stats = %+v", s)
 	}
 }
