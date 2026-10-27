@@ -26,3 +26,7 @@ coverage.txt
 .idea/
 .vscode/
 *.swp
+
+# Local builds of the two binaries
+/rig
+/rig-helper

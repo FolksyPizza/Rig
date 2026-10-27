@@ -1,6 +1,6 @@
 BINARY := rig
 BUILD_DIR := bin
-VERSION := 0.1.0
+VERSION := 0.2.0
 PREFIX := /usr/local
 GO := $(shell command -v go 2>/dev/null || echo "$(HOME)/go-sdk/go/bin/go")
 

@@ -5,6 +5,9 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -33,3 +36,9 @@ jobs:
 
       - name: Test
         run: go test -race ./...
+
+      - name: Cross-compile
+        run: |
+          for target in darwin/arm64 darwin/amd64 windows/amd64 linux/arm64; do
+            GOOS=${target%/*} GOARCH=${target#*/} go build -o /dev/null ./cmd/rig ./cmd/rig-helper
+          done
