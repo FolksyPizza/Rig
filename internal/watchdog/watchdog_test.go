@@ -2,6 +2,7 @@ package watchdog
 
 import (
 	"context"
+	"errors"
 	"testing"
 )
 
@@ -12,14 +13,14 @@ func TestPolicyEvaluate(t *testing.T) {
 		severity   Severity
 		want       Action
 	}{
-		{ModeOff, StrictHigh, SevCritical, ActionAllow},        // off never acts
-		{ModeObserve, StrictHigh, SevCritical, ActionFlag},     // observe only flags
-		{ModeEnforce, StrictLow, SevHigh, ActionFlag},          // low kills only critical
-		{ModeEnforce, StrictLow, SevCritical, ActionKill},      // low kills critical
-		{ModeEnforce, StrictMedium, SevMedium, ActionFlag},     // medium kills high+
-		{ModeEnforce, StrictMedium, SevHigh, ActionKill},       // medium kills high
-		{ModeEnforce, StrictHigh, SevMedium, ActionKill},       // high kills medium+
-		{ModeEnforce, StrictHigh, SevLow, ActionFlag},          // high still flags low
+		{ModeOff, StrictHigh, SevCritical, ActionAllow},    // off never acts
+		{ModeObserve, StrictHigh, SevCritical, ActionFlag}, // observe only flags
+		{ModeEnforce, StrictLow, SevHigh, ActionFlag},      // low kills only critical
+		{ModeEnforce, StrictLow, SevCritical, ActionKill},  // low kills critical
+		{ModeEnforce, StrictMedium, SevMedium, ActionFlag}, // medium kills high+
+		{ModeEnforce, StrictMedium, SevHigh, ActionKill},   // medium kills high
+		{ModeEnforce, StrictHigh, SevMedium, ActionKill},   // high kills medium+
+		{ModeEnforce, StrictHigh, SevLow, ActionFlag},      // high still flags low
 	}
 	for _, tc := range tests {
 		p := Policy{Mode: tc.mode, Strictness: tc.strictness}
@@ -61,7 +62,7 @@ func TestMonitorEnforceKills(t *testing.T) {
 	enf := &fakeEnforcer{}
 	var events []Event
 	m := &Monitor{
-		Policy:   Policy{Mode: ModeEnforce, Strictness: StrictHigh},
+		Policy: Policy{Mode: ModeEnforce, Strictness: StrictHigh},
 		Observer: fakeObserver{obs: []Observation{
 			{Kind: "network_denied", Severity: SevLow},
 			{Kind: "banned_process", Severity: SevHigh, Detail: "nc"},
@@ -106,5 +107,73 @@ func TestMonitorOffIsNoop(t *testing.T) {
 	cause, err := m.Run(context.Background())
 	if err != nil || cause != nil {
 		t.Fatalf("off mode should be a noop; got cause=%+v err=%v", cause, err)
+	}
+}
+
+func TestInfoIsNeverActedOn(t *testing.T) {
+	for _, mode := range []Mode{ModeObserve, ModeEnforce} {
+		p := Policy{Mode: mode, Strictness: StrictHigh}
+		if got := p.Evaluate(Observation{Severity: SevInfo}); got != ActionAllow {
+			t.Errorf("mode %s: info observation = %s, want allow", mode, got)
+		}
+	}
+}
+
+func TestAdvisoryNeverKills(t *testing.T) {
+	p := Policy{Mode: ModeEnforce, Strictness: StrictHigh}
+	if got := p.Evaluate(Observation{Severity: SevCritical, Advisory: true}); got != ActionFlag {
+		t.Errorf("advisory critical = %s, want flag", got)
+	}
+}
+
+func TestMonitorReportsEverything(t *testing.T) {
+	var events []Event
+	m := &Monitor{
+		Policy:   Policy{Mode: ModeObserve},
+		Observer: fakeObserver{obs: []Observation{{Kind: "a", Severity: SevInfo}, {Kind: "b", Severity: SevLow}}},
+		Report:   func(e Event) { events = append(events, e) },
+	}
+	if _, err := m.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 2 || events[0].Action != ActionAllow || events[1].Action != ActionFlag {
+		t.Fatalf("every observation should be reported with its action: %+v", events)
+	}
+}
+
+func TestMerge(t *testing.T) {
+	m := Merge(
+		fakeObserver{obs: []Observation{{Kind: "a"}, {Kind: "b"}}},
+		fakeObserver{obs: []Observation{{Kind: "c"}}},
+		failingObserver{},
+	)
+	ch, err := m.Observe(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for o := range ch {
+		got[o.Kind] = true
+	}
+	if len(got) != 3 {
+		t.Errorf("merged stream = %v, want a, b and c", got)
+	}
+	if _, err := Merge(failingObserver{}).Observe(context.Background()); err == nil {
+		t.Error("merging only failing sources should fail")
+	}
+}
+
+type failingObserver struct{}
+
+func (failingObserver) Observe(ctx context.Context) (<-chan Observation, error) {
+	return nil, errors.New("cannot start")
+}
+
+func TestSeverityStrings(t *testing.T) {
+	for _, s := range []Severity{SevInfo, SevLow, SevMedium, SevHigh, SevCritical} {
+		back, ok := ParseSeverity(s.String())
+		if !ok || back != s {
+			t.Errorf("round trip of %v failed", s)
+		}
 	}
 }

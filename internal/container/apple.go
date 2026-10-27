@@ -7,17 +7,16 @@ import (
 	"os/exec"
 	"sort"
 	"time"
-
-	"github.com/FolksyPizza/rig/internal/config"
 )
 
-// appleCreateArgs builds an Apple `container create` invocation. Apple's CLI is largely
-// Docker-compatible but omits a few flags (--pids-limit, --memory-swap, --security-opt,
-// --storage-opt); resource limits it does support (cpus, memory) and cap-drop are applied.
-// Mounts use --mount rather than -v. Network allowlist mode is not yet mapped and is left
-// on the default network (handled/guarded by the caller).
-func appleCreateArgs(profile *config.Profile, name, networkName, envFile string, ephemeral bool) []string {
-	args := []string{"create", "--name", name}
+// appleCreateArgs builds an Apple `container create` invocation. Apple's CLI
+// is largely Docker-compatible but omits several flags (--pids-limit,
+// --memory-swap, --security-opt, --storage-opt) and has no internal networks;
+// CheckEngineSupport refuses profiles that need what it lacks. Each Apple
+// container runs in its own lightweight VM, which is the isolation boundary.
+func appleCreateArgs(spec LaunchSpec, o createOpts) []string {
+	profile := spec.Profile
+	args := []string{"create", "--name", o.name}
 	args = append(args, ttyFlags()...)
 	args = append(args,
 		"--init",
@@ -26,45 +25,44 @@ func appleCreateArgs(profile *config.Profile, name, networkName, envFile string,
 		"-m", fmt.Sprintf("%dM", profile.Resources.Memory),
 		"--label", LabelProfile+"="+profile.Name,
 		"--label", LabelRole+"="+RoleSandbox,
+		"--label", "rig.level="+spec.Effective.Level,
 		"--label", "rig.created="+time.Now().UTC().Format(time.RFC3339),
 	)
-
-	if envFile != "" {
-		args = append(args, "--env-file", envFile)
+	if o.envFile != "" {
+		args = append(args, "--env-file", o.envFile)
 	}
-	if profile.Network.Mode == "none" {
-		args = append(args, "--no-dns")
-	}
-
 	for _, v := range profile.Storage.Volumes {
 		vol := "rig-" + profile.Name + "-" + v.Name
-		spec := fmt.Sprintf("type=volume,source=%s,target=%s", vol, v.Target)
+		mspec := fmt.Sprintf("type=volume,source=%s,target=%s", vol, v.Target)
 		if v.ReadOnly {
-			spec += ",readonly"
+			mspec += ",readonly"
 		}
-		args = append(args, "--mount", spec)
+		args = append(args, "--mount", mspec)
 	}
-	for _, m := range profile.Mounts {
-		spec := fmt.Sprintf("type=bind,source=%s,target=%s", m.Source, m.Target)
+	for _, m := range o.mounts {
+		if m.Tmpfs {
+			continue
+		}
+		mspec := fmt.Sprintf("type=bind,source=%s,target=%s", m.Source, m.Target)
 		if m.ReadOnly {
-			spec += ",readonly"
+			mspec += ",readonly"
 		}
-		args = append(args, "--mount", spec)
+		args = append(args, "--mount", mspec)
 	}
-
-	if ephemeral {
+	if o.ephemeral {
 		args = append(args, "--rm")
 	}
-
 	args = append(args, profile.ImageTag())
-	if !ephemeral {
+	switch {
+	case !o.ephemeral:
 		args = append(args, "sleep", "infinity")
+	case len(o.command) > 0:
+		args = append(args, o.command...)
 	}
 	return args
 }
 
 // appleContainer mirrors the fields Rig needs from `container ls --format json`.
-// `status` is an object (state + networks), not a string.
 type appleContainer struct {
 	Status struct {
 		State string `json:"state"`
@@ -78,8 +76,7 @@ type appleContainer struct {
 	} `json:"configuration"`
 }
 
-// appleList lists Rig sandboxes, filtering client-side by label (Apple's ls has no
-// server-side label filter).
+// appleList lists Rig sandboxes, filtering client-side by label.
 func (r *Runner) appleList(ctx context.Context, labelFilters ...string) []ContainerInfo {
 	out, err := exec.CommandContext(ctx, r.bin, "ls", "--all", "--format", "json").Output()
 	if err != nil {
@@ -89,18 +86,17 @@ func (r *Runner) appleList(ctx context.Context, labelFilters ...string) []Contai
 	if json.Unmarshal(out, &items) != nil {
 		return nil
 	}
-
 	var containers []ContainerInfo
 	for _, it := range items {
 		if !matchesLabels(it.Configuration.Labels, labelFilters) {
 			continue
 		}
 		containers = append(containers, ContainerInfo{
-			Name:      it.Configuration.ID,
-			Profile:   it.Configuration.Labels[LabelProfile],
-			Image:     it.Configuration.Image.Reference,
-			Status:    it.Status.State,
-			Running:   it.Status.State == "running",
+			Name:    it.Configuration.ID,
+			Profile: it.Configuration.Labels[LabelProfile],
+			Image:   it.Configuration.Image.Reference,
+			Status:  it.Status.State,
+			Running: it.Status.State == "running",
 		})
 	}
 	sort.Slice(containers, func(i, j int) bool { return containers[i].Name < containers[j].Name })

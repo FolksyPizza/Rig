@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/FolksyPizza/rig/internal/config"
 	"github.com/FolksyPizza/rig/internal/provider"
+	"github.com/FolksyPizza/rig/internal/security"
 )
 
 // Labels Rig stamps on every container it creates. Lookups filter on these
@@ -28,21 +30,22 @@ const (
 	RoleSandbox  = "sandbox"
 )
 
+// sudoCaps are the capabilities package managers need when the sandbox user
+// has sudo. Docker's defaults minus NET_RAW, MKNOD and SYS_CHROOT.
+var sudoCaps = []string{"CHOWN", "DAC_OVERRIDE", "FOWNER", "FSETID", "KILL", "SETGID", "SETUID", "NET_BIND_SERVICE", "SETFCAP", "AUDIT_WRITE"}
+
 // stdinIsTerminal reports whether stdin is an interactive terminal.
 //
-// Docker only exits an attached session on EOF when no TTY was requested.
+// The engine only exits an attached session on EOF when no TTY was requested.
 // Passing -t unconditionally makes `rig run` and `rig exec` hang forever
-// whenever stdin is a pipe or /dev/null — in scripts, CI, and `rig exec ... |
-// grep`. The docker CLI makes the same distinction for the same reason.
-// A file-mode check is not sufficient here: /dev/null is itself a character
-// device, so testing os.ModeCharDevice reports a terminal for the common
-// `rig run x < /dev/null` case and reintroduces the hang.
+// whenever stdin is a pipe or /dev/null. A file-mode check is not sufficient:
+// /dev/null is itself a character device.
 func stdinIsTerminal() bool {
 	fd := os.Stdin.Fd()
 	return isatty.IsTerminal(fd) || isatty.IsCygwinTerminal(fd)
 }
 
-// ttyFlags returns the interactive flags to hand docker for this session.
+// ttyFlags returns the interactive flags to hand the engine for this session.
 func ttyFlags() []string {
 	if stdinIsTerminal() {
 		return []string{"-i", "-t"}
@@ -51,15 +54,14 @@ func ttyFlags() []string {
 }
 
 // Runner drives a container engine. kind is "" for a Docker-compatible engine
-// (docker/podman, identical CLI) or "apple" for Apple's native `container`, which
-// takes a different create/list surface.
+// (docker/podman, identical CLI) or "apple" for Apple's native `container`.
 type Runner struct {
 	bin  string
 	kind string
+	name string // docker | podman | apple
 }
 
-// NewRunner selects the platform's container engine: Apple `container` on macOS, Podman on
-// Linux/Windows, Docker as a compatible fallback. Rig no longer depends on Docker.
+// NewRunner selects the platform's container engine.
 func NewRunner() (*Runner, error) {
 	p := provider.Detect()
 	if !p.Available() {
@@ -69,10 +71,16 @@ func NewRunner() (*Runner, error) {
 	if p.Name() == "apple" {
 		kind = "apple"
 	}
-	return &Runner{bin: p.Bin(), kind: kind}, nil
+	return &Runner{bin: p.Bin(), kind: kind, name: p.Name()}, nil
 }
 
 func (r *Runner) Close() {}
+
+// Bin is the engine's command.
+func (r *Runner) Bin() string { return r.bin }
+
+// Engine is the engine's name.
+func (r *Runner) Engine() string { return r.name }
 
 func (r *Runner) ContainerName(profileName string, instance int) string {
 	if instance <= 1 {
@@ -81,79 +89,148 @@ func (r *Runner) ContainerName(profileName string, instance int) string {
 	return fmt.Sprintf("rig-%s-%d", profileName, instance)
 }
 
-// RunOptions controls how Run picks and starts a sandbox instance.
+// RunOptions controls how a sandbox instance is picked and started.
 type RunOptions struct {
-	// NewInstance forces a fresh container even when an instance of this
-	// profile already exists.
+	// NewInstance forces a fresh container even when one exists.
 	NewInstance bool
 	// Timeout, if non-zero, stops the sandbox after the given duration.
 	Timeout time.Duration
+	// Command runs instead of an interactive shell.
+	Command []string
+	// Recreate replaces an existing instance whose image is out of date.
+	Recreate bool
+	// Container enters this existing instance instead of picking one.
+	Container string
+	// KeepRunning leaves a persistent sandbox running after the last
+	// session ends. Without it, Rig stops the sandbox so nothing runs in it
+	// unmonitored.
+	KeepRunning bool
 }
 
-// Run enters a sandbox for the profile, creating it if necessary.
-//
-// Persistent sandboxes are created detached around a long-lived init process
-// and entered with `docker exec`. That is what makes them re-enterable: a
-// container whose main process is an interactive shell exits the moment its
-// stdin closes, so the previous approach of `docker start` followed by
-// `docker exec` would routinely exec into a container that had already died.
-// Ephemeral sandboxes keep the shell as the main process and vanish on exit.
-func (r *Runner) Run(ctx context.Context, profile *config.Profile, networkName string, opts RunOptions) error {
-	if !opts.NewInstance {
-		if existing, ok := r.findReusable(ctx, profile.Name); ok {
-			if !existing.Running {
-				if out, err := exec.CommandContext(ctx, r.bin, "start", existing.Name).CombinedOutput(); err != nil {
-					return fmt.Errorf("start container %s: %s", existing.Name, strings.TrimSpace(string(out)))
+// LaunchSpec is everything needed to create a sandbox container.
+type LaunchSpec struct {
+	Profile   *config.Profile
+	Effective config.Effective
+	Isolation Isolation
+	Network   *NetworkSetup // nil unless allowlist mode
+	Gateway   bool          // a gateway runs for this profile
+}
+
+// Prepared is a sandbox ready to be entered.
+type Prepared struct {
+	Name     string
+	Fresh    bool // created by this call
+	attached bool // ephemeral: the shell is the main process
+	cleanup  func()
+}
+
+// Prepare finds or creates the sandbox container. An ephemeral sandbox is
+// created but not started: Attach starts it with the shell as its main
+// process. A persistent one is started around a long-lived init so sessions
+// can come and go.
+func (r *Runner) Prepare(ctx context.Context, spec LaunchSpec, opts RunOptions) (*Prepared, error) {
+	profile := spec.Profile
+	if opts.Container != "" {
+		for _, c := range r.ListByProfile(ctx, profile.Name) {
+			if c.Name != opts.Container {
+				continue
+			}
+			if !c.Running {
+				if out, err := exec.CommandContext(ctx, r.bin, "start", c.Name).CombinedOutput(); err != nil {
+					return nil, fmt.Errorf("start container %s: %s", c.Name, strings.TrimSpace(string(out)))
 				}
 			}
-			r.armTimeout(ctx, existing.Name, opts.Timeout)
-			return r.execInto(ctx, existing.Name)
+			return &Prepared{Name: c.Name}, nil
+		}
+		return nil, fmt.Errorf("container %s is not an instance of sandbox %s", opts.Container, profile.Name)
+	}
+	if !opts.NewInstance {
+		if existing, ok := r.findReusable(ctx, profile.Name); ok {
+			stale := r.imageOutdated(ctx, existing.Name, profile.ImageTag())
+			switch {
+			case stale && opts.Recreate:
+				if err := r.Destroy(ctx, existing.Name); err != nil {
+					return nil, err
+				}
+			case stale:
+				fmt.Fprintf(os.Stderr, "  Note: %s was created from an older image. Run with --recreate to apply profile changes (named volumes are kept).\n", existing.Name)
+				fallthrough
+			default:
+				if !existing.Running {
+					if out, err := exec.CommandContext(ctx, r.bin, "start", existing.Name).CombinedOutput(); err != nil {
+						return nil, fmt.Errorf("start container %s: %s", existing.Name, strings.TrimSpace(string(out)))
+					}
+				}
+				return &Prepared{Name: existing.Name}, nil
+			}
 		}
 	}
 
-	containerName := r.ContainerName(profile.Name, r.nextInstance(ctx, profile.Name))
+	name := r.ContainerName(profile.Name, r.nextInstance(ctx, profile.Name))
 	ephemeral := profile.Persistence == "ephemeral"
 
-	envFile, cleanupEnv, err := writeEnvFile(profile)
+	env, err := SandboxEnv(spec)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	defer cleanupEnv()
+	envFile, cleanup, err := writeEnvMap(env)
+	if err != nil {
+		return nil, err
+	}
 
-	args := r.buildCreateArgs(profile, containerName, networkName, envFile, ephemeral)
+	home, _ := os.UserHomeDir()
+	mounts, err := ResolveMounts(profile, spec.Effective, home)
+	if err != nil {
+		cleanup()
+		return nil, err
+	}
+
+	args := r.buildCreateArgs(spec, createOpts{
+		name:      name,
+		envFile:   envFile,
+		ephemeral: ephemeral,
+		mounts:    mounts,
+		command:   opts.Command,
+	})
 	if err := r.create(ctx, args); err != nil {
-		return err
+		cleanup()
+		return nil, err
 	}
-
-	r.armTimeout(ctx, containerName, opts.Timeout)
+	cleanup()
 
 	if ephemeral {
-		// The shell is the container's main process; attach to it directly.
-		return r.startAttached(ctx, containerName)
+		return &Prepared{Name: name, Fresh: true, attached: true}, nil
 	}
-
-	if out, err := exec.CommandContext(ctx, r.bin, "start", containerName).CombinedOutput(); err != nil {
-		return fmt.Errorf("start container %s: %s", containerName, strings.TrimSpace(string(out)))
+	if out, err := exec.CommandContext(ctx, r.bin, "start", name).CombinedOutput(); err != nil {
+		return nil, fmt.Errorf("start container %s: %s", name, strings.TrimSpace(string(out)))
 	}
-	return r.execInto(ctx, containerName)
+	return &Prepared{Name: name, Fresh: true}, nil
 }
 
-// create runs `docker create` and retries without --storage-opt if the host's
-// storage driver does not support per-container quotas. Quota support needs
-// overlay2 on xfs with pquota (or btrfs/zfs), which is a minority of hosts;
-// failing the launch outright over an advisory disk cap is not worth it.
+// Attach enters a prepared sandbox and returns when the session ends.
+func (r *Runner) Attach(ctx context.Context, p *Prepared, opts RunOptions) error {
+	r.armTimeout(ctx, p.Name, opts.Timeout)
+	if p.attached {
+		return r.startAttached(ctx, p.Name)
+	}
+	if len(opts.Command) > 0 {
+		return r.Exec(ctx, p.Name, opts.Command)
+	}
+	return r.execInto(ctx, p.Name)
+}
+
+// create runs `create` and retries without --storage-opt if the storage
+// driver does not support per-container quotas.
 func (r *Runner) create(ctx context.Context, args []string) error {
 	out, err := exec.CommandContext(ctx, r.bin, args...).CombinedOutput()
 	if err == nil {
 		return nil
 	}
-
 	msg := string(out)
 	if strings.Contains(msg, "storage-opt") || strings.Contains(msg, "storage opt") {
 		stripped, dropped := stripStorageOpt(args)
 		if dropped {
-			fmt.Fprintf(os.Stderr,
-				"  Warning: this Docker storage driver does not support per-container size limits; ignoring storage.size.\n")
+			fmt.Fprintf(os.Stderr, "  Warning: this storage driver does not support per-container size limits; ignoring storage.size.\n")
 			if out2, err2 := exec.CommandContext(ctx, r.bin, stripped...).CombinedOutput(); err2 == nil {
 				return nil
 			} else {
@@ -178,9 +255,7 @@ func stripStorageOpt(args []string) ([]string, bool) {
 	return out, dropped
 }
 
-// armTimeout schedules a stop for the sandbox after d. It survives the parent
-// exiting so `rig run --timeout` behaves the same whether the user stays
-// attached or detaches.
+// armTimeout schedules a stop for the sandbox after d.
 func (r *Runner) armTimeout(ctx context.Context, containerName string, d time.Duration) {
 	if d <= 0 {
 		return
@@ -197,9 +272,11 @@ func (r *Runner) armTimeout(ctx context.Context, containerName string, d time.Du
 	}()
 }
 
+// Exec runs a command in a running sandbox. It goes through the entrypoint so
+// the session gets the same environment cleanup as the main process.
 func (r *Runner) Exec(ctx context.Context, containerName string, command []string) error {
 	args := append([]string{"exec"}, ttyFlags()...)
-	args = append(args, containerName)
+	args = append(args, containerName, "/usr/local/bin/rig-entrypoint")
 	args = append(args, command...)
 	cmd := exec.CommandContext(ctx, r.bin, args...)
 	cmd.Stdin = os.Stdin
@@ -212,17 +289,35 @@ func (r *Runner) Shell(ctx context.Context, containerName string) error {
 	return r.execInto(ctx, containerName)
 }
 
+// Stop stops a container, keeping its filesystem.
 func (r *Runner) Stop(ctx context.Context, name string) error {
-	cmd := exec.CommandContext(ctx, r.bin, "stop", name)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	if out, err := exec.CommandContext(ctx, r.bin, "stop", name).CombinedOutput(); err != nil {
+		return fmt.Errorf("stop %s: %s", name, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// Running reports whether a container is running.
+func (r *Runner) Running(ctx context.Context, name string) bool {
+	if r.kind == "apple" {
+		for _, c := range r.ListSandboxes(ctx) {
+			if c.Name == name {
+				return c.Running
+			}
+		}
+		return false
+	}
+	return r.containerRunning(ctx, name)
+}
+
+// Kill stops a sandbox immediately.
+func (r *Runner) Kill(ctx context.Context, name string) error {
+	return exec.CommandContext(ctx, r.bin, "kill", name).Run()
 }
 
 func (r *Runner) StopAll(ctx context.Context, profileName string) (int, error) {
-	containers := r.ListByProfile(ctx, profileName)
 	n := 0
-	for _, c := range containers {
+	for _, c := range r.ListByProfile(ctx, profileName) {
 		if c.Running {
 			if err := exec.CommandContext(ctx, r.bin, "stop", c.Name).Run(); err != nil {
 				return n, fmt.Errorf("stop %s: %w", c.Name, err)
@@ -242,9 +337,8 @@ func (r *Runner) Destroy(ctx context.Context, name string) error {
 }
 
 func (r *Runner) DestroyAll(ctx context.Context, profileName string) (int, error) {
-	containers := r.ListByProfile(ctx, profileName)
 	n := 0
-	for _, c := range containers {
+	for _, c := range r.ListByProfile(ctx, profileName) {
 		_ = exec.CommandContext(ctx, r.bin, "stop", c.Name).Run()
 		if err := exec.CommandContext(ctx, r.bin, "rm", "-f", c.Name).Run(); err != nil {
 			return n, fmt.Errorf("remove %s: %w", c.Name, err)
@@ -252,6 +346,17 @@ func (r *Runner) DestroyAll(ctx context.Context, profileName string) (int, error
 		n++
 	}
 	return n, nil
+}
+
+// RemoveVolumes deletes a profile's named volumes (workspace, home, ...).
+func (r *Runner) RemoveVolumes(ctx context.Context, profile *config.Profile) {
+	names := []string{"rig-" + profile.Name + "-home"}
+	for _, v := range profile.Storage.Volumes {
+		names = append(names, "rig-"+profile.Name+"-"+v.Name)
+	}
+	for _, n := range names {
+		_ = exec.CommandContext(ctx, r.bin, "volume", "rm", n).Run()
+	}
 }
 
 func (r *Runner) Logs(ctx context.Context, containerName string, follow bool, tail string) error {
@@ -293,8 +398,8 @@ type ContainerInfo struct {
 	Ports     string
 }
 
-// ListSandboxes returns every Rig sandbox container. The proxy sidecars are
-// labelled with a different role and are deliberately excluded.
+// ListSandboxes returns every Rig sandbox container. Proxy and gateway
+// containers carry other roles and are excluded.
 func (r *Runner) ListSandboxes(ctx context.Context) []ContainerInfo {
 	return r.list(ctx, LabelRole+"="+RoleSandbox)
 }
@@ -319,7 +424,6 @@ func (r *Runner) list(ctx context.Context, labelFilters ...string) []ContainerIn
 	if err != nil {
 		return nil
 	}
-
 	var containers []ContainerInfo
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		if line == "" {
@@ -361,11 +465,10 @@ func profileFromLabels(labels string) string {
 }
 
 func (r *Runner) ContainerStats(ctx context.Context, containerName string) (string, error) {
-	cmd := exec.CommandContext(ctx, r.bin, "stats", "--no-stream",
+	out, err := exec.CommandContext(ctx, r.bin, "stats", "--no-stream",
 		"--format", "CPU: {{.CPUPerc}}  Mem: {{.MemUsage}}  Net: {{.NetIO}}  PIDs: {{.PIDs}}",
 		containerName,
-	)
-	out, err := cmd.Output()
+	).Output()
 	if err != nil {
 		return "", err
 	}
@@ -387,11 +490,52 @@ func (r *Runner) Unpause(ctx context.Context, containerName string) error {
 	return exec.CommandContext(ctx, r.bin, "unpause", containerName).Run()
 }
 
+// Commit snapshots a container as an image. The environment the sandbox was
+// started with (API keys among it) would otherwise be copied into the
+// image's configuration, so those variables are blanked in the snapshot.
 func (r *Runner) Commit(ctx context.Context, containerName, tag string) error {
-	cmd := exec.CommandContext(ctx, r.bin, "commit", containerName, tag)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	args := []string{"commit"}
+	for _, k := range r.addedEnv(ctx, containerName) {
+		args = append(args, "--change", "ENV "+k+"=")
+	}
+	args = append(args, containerName, tag)
+	if out, err := exec.CommandContext(ctx, r.bin, args...).CombinedOutput(); err != nil {
+		return fmt.Errorf("commit %s: %s", containerName, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// addedEnv names the variables a container has that its image does not.
+func (r *Runner) addedEnv(ctx context.Context, containerName string) []string {
+	out, err := exec.CommandContext(ctx, r.bin, "inspect", "-f", "{{json .Config.Env}}\t{{.Config.Image}}", containerName).Output()
+	if err != nil {
+		return nil
+	}
+	envJSON, image, _ := strings.Cut(strings.TrimSpace(string(out)), "\t")
+	var env []string
+	if json.Unmarshal([]byte(envJSON), &env) != nil {
+		return nil
+	}
+	base := map[string]bool{}
+	if imgOut, err := exec.CommandContext(ctx, r.bin, "image", "inspect", "-f", "{{json .Config.Env}}", image).Output(); err == nil {
+		var imgEnv []string
+		if json.Unmarshal(imgOut, &imgEnv) == nil {
+			for _, kv := range imgEnv {
+				base[kv] = true
+			}
+		}
+	}
+	var names []string
+	for _, kv := range env {
+		if base[kv] {
+			continue
+		}
+		if k, _, ok := strings.Cut(kv, "="); ok && k != "" {
+			names = append(names, k)
+		}
+	}
+	sort.Strings(names)
+	return names
 }
 
 func (r *Runner) Top(ctx context.Context, containerName string) error {
@@ -408,21 +552,31 @@ func (r *Runner) Diff(ctx context.Context, containerName string) error {
 	return cmd.Run()
 }
 
-// buildCreateArgs assembles the create invocation for a sandbox, in the engine's dialect.
-func (r *Runner) buildCreateArgs(profile *config.Profile, name, networkName, envFile string, ephemeral bool) []string {
+type createOpts struct {
+	name      string
+	envFile   string
+	ephemeral bool
+	mounts    []MountSpec
+	command   []string
+}
+
+// buildCreateArgs assembles the create invocation for a sandbox.
+func (r *Runner) buildCreateArgs(spec LaunchSpec, o createOpts) []string {
 	if r.kind == "apple" {
-		return appleCreateArgs(profile, name, networkName, envFile, ephemeral)
+		return appleCreateArgs(spec, o)
 	}
-	args := []string{
-		"create",
-		"--name", name,
-	}
+	profile, eff := spec.Profile, spec.Effective
+
+	args := []string{"create", "--name", o.name}
 	args = append(args, ttyFlags()...)
 	args = append(args,
 		"--init", // reap zombies so the PID limit is not eaten by defunct processes
-		"--hostname", "rig-"+profile.Name,
-		"--security-opt", "no-new-privileges",
+		// A generic hostname: the profile name can say more about you than
+		// the agent needs to know.
+		"--hostname", "sandbox",
 		"--cap-drop", "ALL",
+		"--cgroupns", "private",
+		"--ipc", "private",
 		fmt.Sprintf("--cpus=%.2f", profile.Resources.CPU),
 		fmt.Sprintf("--memory=%dm", profile.Resources.Memory),
 		// Without an equal swap limit the memory cap can be exceeded via swap.
@@ -430,26 +584,67 @@ func (r *Runner) buildCreateArgs(profile *config.Profile, name, networkName, env
 		fmt.Sprintf("--pids-limit=%d", profile.Resources.PIDLimit),
 		"--label", LabelProfile+"="+profile.Name,
 		"--label", LabelRole+"="+RoleSandbox,
+		"--label", "rig.level="+eff.Level,
+		"--label", "rig.isolation="+spec.Isolation.Level,
 		"--label", "rig.created="+time.Now().UTC().Format(time.RFC3339),
 	)
-
-	if envFile != "" {
-		args = append(args, "--env-file", envFile)
+	if eff.Sudo {
+		// sudo is setuid, which no-new-privileges would disable.
+		for _, c := range sudoCaps {
+			args = append(args, "--cap-add", c)
+		}
+	} else {
+		args = append(args, "--security-opt", "no-new-privileges")
+	}
+	if spec.Isolation.Runtime != "" {
+		args = append(args, "--runtime", spec.Isolation.Runtime)
 	}
 
-	switch profile.Network.Mode {
+	if eff.ReadOnlyRoot {
+		args = append(args, "--read-only")
+		tmp := "/tmp:rw,nosuid,nodev,size=1g,mode=1777"
+		if eff.NoExecTmp {
+			tmp = "/tmp:rw,nosuid,nodev,noexec,size=1g,mode=1777"
+		}
+		args = append(args, "--tmpfs", tmp)
+
+		hasWorkspace := false
+		for _, v := range profile.Storage.Volumes {
+			if path.Clean(v.Target) == sandboxHome+"/workspace" {
+				hasWorkspace = true
+			}
+		}
+		switch {
+		case !o.ephemeral:
+			// Persistent: home lives in a named volume, seeded from the
+			// image the first time.
+			args = append(args, "-v", "rig-"+profile.Name+"-home:"+sandboxHome)
+		case eff.NoExecHome:
+			args = append(args, "--tmpfs", fmt.Sprintf("%s:rw,nosuid,nodev,noexec,size=1g,uid=%d,gid=%d,mode=0755", sandboxHome, sandboxUID, sandboxUID))
+			if !hasWorkspace {
+				args = append(args, "-v", sandboxHome+"/workspace")
+			}
+		default:
+			// Anonymous volume, seeded from the image and removed with the
+			// container.
+			args = append(args, "-v", sandboxHome)
+		}
+	}
+
+	if o.envFile != "" {
+		args = append(args, "--env-file", o.envFile)
+	}
+
+	switch eff.NetworkMode {
 	case "allowlist":
-		// networkName is the --internal network; the sandbox has no route out
-		// except through the proxy sidecar.
-		args = append(args, "--network", networkName)
-		args = append(args,
-			"-e", "HTTP_PROXY=http://"+ProxyAlias+":3128",
-			"-e", "HTTPS_PROXY=http://"+ProxyAlias+":3128",
-			"-e", "http_proxy=http://"+ProxyAlias+":3128",
-			"-e", "https_proxy=http://"+ProxyAlias+":3128",
-			"-e", "NO_PROXY=localhost,127.0.0.1",
-			"-e", "no_proxy=localhost,127.0.0.1",
-		)
+		if spec.Network != nil {
+			args = append(args, "--network", spec.Network.Network)
+			// gVisor and VM runtimes may not see the engine's embedded DNS,
+			// so give them the proxy's address directly.
+			if spec.Isolation.Level != config.IsolationContainer && spec.Network.ProxyIP != "" {
+				args = append(args, "--add-host", ProxyAlias+":"+spec.Network.ProxyIP)
+			}
+		}
 	case "none":
 		args = append(args, "--network", "none")
 	}
@@ -457,7 +652,6 @@ func (r *Runner) buildCreateArgs(profile *config.Profile, name, networkName, env
 	if profile.Storage.Size != "" {
 		args = append(args, "--storage-opt", "size="+profile.Storage.Size)
 	}
-
 	for _, v := range profile.Storage.Volumes {
 		flag := "rig-" + profile.Name + "-" + v.Name + ":" + v.Target
 		if v.ReadOnly {
@@ -465,68 +659,205 @@ func (r *Runner) buildCreateArgs(profile *config.Profile, name, networkName, env
 		}
 		args = append(args, "-v", flag)
 	}
-
-	for _, m := range profile.Mounts {
-		flag := m.Source + ":" + m.Target
-		if m.ReadOnly {
-			flag += ":ro"
-		}
-		args = append(args, "-v", flag)
+	for _, m := range o.mounts {
+		args = append(args, m.Args()...)
 	}
 
-	if ephemeral {
+	if o.ephemeral {
 		args = append(args, "--rm")
 	}
-
 	args = append(args, profile.ImageTag())
 
-	if !ephemeral {
+	switch {
+	case !o.ephemeral:
 		// A persistent sandbox needs a main process that outlives any one
-		// shell session, so sessions can come and go via `docker exec`.
+		// shell session, so sessions can come and go via exec.
 		args = append(args, "sleep", "infinity")
+	case len(o.command) > 0:
+		args = append(args, o.command...)
 	}
-
 	return args
 }
 
-// writeEnvFile materialises resolved agent secrets into a 0600 file for
-// --env-file. Passing them as -e KEY=value would expose every API key in the
-// host's process list to any local user running `ps`.
-func writeEnvFile(profile *config.Profile) (string, func(), error) {
-	lines := make([]string, 0)
-	for _, ac := range profile.Agents {
+// SandboxEnv is the sandbox's runtime environment: agent secrets resolved
+// from the host, MCP secrets, proxy settings, the git broker rewrite, and the
+// level's hardening switches. It goes to the container through a private
+// env file, never on a command line.
+func SandboxEnv(spec LaunchSpec) (map[string]string, error) {
+	p, eff := spec.Profile, spec.Effective
+	env := map[string]string{
+		"RIG_PROFILE": p.Name,
+		"RIG_LEVEL":   eff.Level,
+	}
+	for _, ac := range p.Agents {
 		for k, v := range config.ResolveEnvVars(ac.Env) {
-			if v == "" {
-				continue
+			if v != "" {
+				env[k] = v
 			}
-			if strings.ContainsAny(v, "\n\r\x00") {
-				return "", func() {}, fmt.Errorf("value for %s contains a newline, which cannot be passed to the sandbox", k)
-			}
-			lines = append(lines, k+"="+v)
 		}
 	}
-	if len(lines) == 0 {
-		return "", func() {}, nil
-	}
-	sort.Strings(lines)
-
-	dir, err := os.MkdirTemp("", "rig-env-*")
+	plan, err := planMCPForProfile(p, eff)
 	if err != nil {
-		return "", func() {}, fmt.Errorf("create env dir: %w", err)
+		return nil, err
 	}
-	cleanup := func() { _ = os.RemoveAll(dir) }
+	for k, v := range plan.sandboxEnv {
+		if host, ok := envRef(v); ok {
+			v = os.Getenv(host)
+		}
+		if v != "" {
+			env[k] = v
+		}
+	}
 
-	path := filepath.Join(dir, "sandbox.env")
-	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
-		cleanup()
-		return "", func() {}, fmt.Errorf("write env file: %w", err)
+	if eff.QuietAgents {
+		for k, v := range quietEnv(p) {
+			env[k] = v
+		}
 	}
-	return path, cleanup, nil
+	if eff.NpmIgnoreScripts {
+		env["NPM_CONFIG_IGNORE_SCRIPTS"] = "true"
+	}
+	if eff.PipOnlyBinary {
+		env["PIP_ONLY_BINARY"] = ":all:"
+	}
+
+	noProxy := "localhost,127.0.0.1"
+	if spec.Gateway {
+		noProxy += "," + GatewayHost
+	}
+	if eff.NetworkMode == "allowlist" {
+		proxyURL := fmt.Sprintf("http://%s:%d", ProxyAlias, ProxyPort)
+		for _, k := range []string{"HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"} {
+			env[k] = proxyURL
+		}
+		env["NO_PROXY"], env["no_proxy"] = noProxy, noProxy
+		// Node's built-in fetch ignores proxy variables unless told otherwise.
+		// Node then warns on every start that this is experimental; hide
+		// that one warning.
+		env["NODE_USE_ENV_PROXY"] = "1"
+		env["NODE_OPTIONS"] = "--disable-warning=UNDICI-EHPA"
+	}
+
+	if len(p.Git.Repos) > 0 {
+		base := fmt.Sprintf("http://%s:%d/git/%s/", GatewayHost, config.GatewayPort, p.Git.GitHost())
+		key := "url." + base + ".insteadOf"
+		values := []string{"https://" + p.Git.GitHost() + "/", "git@" + p.Git.GitHost() + ":", "ssh://git@" + p.Git.GitHost() + "/"}
+		env["GIT_CONFIG_COUNT"] = strconv.Itoa(len(values))
+		for i, v := range values {
+			env[fmt.Sprintf("GIT_CONFIG_KEY_%d", i)] = key
+			env[fmt.Sprintf("GIT_CONFIG_VALUE_%d", i)] = v
+		}
+	}
+	return env, nil
+}
+
+func planMCPForProfile(p *config.Profile, eff config.Effective) (mcpPlan, error) {
+	ids := make([]string, 0, len(p.Agents))
+	for _, a := range p.Agents {
+		ids = append(ids, a.ID)
+	}
+	specs, err := resolveAgents(ids)
+	if err != nil {
+		return mcpPlan{}, err
+	}
+	return planMCP(p, eff, specs)
+}
+
+// MountSpec is one bind or tmpfs mount, already resolved on the host.
+type MountSpec struct {
+	Source   string // host path; empty for tmpfs
+	Target   string
+	ReadOnly bool
+	Tmpfs    bool // an empty, inaccessible tmpfs (used to hide a directory)
+}
+
+// Args renders the mount as engine flags.
+func (m MountSpec) Args() []string {
+	if m.Tmpfs {
+		return []string{"--mount", "type=tmpfs,destination=" + m.Target + ",tmpfs-size=4k,tmpfs-mode=0000"}
+	}
+	flag := m.Source + ":" + m.Target
+	if m.ReadOnly {
+		flag += ":ro"
+	}
+	return []string{"-v", flag}
+}
+
+// ResolveMounts turns the profile's mounts into concrete mounts. Host paths
+// are resolved through symlinks and re-checked, protected paths inside
+// writable mounts are mounted again read-only, and hidden paths are covered
+// by an empty file or directory.
+func ResolveMounts(p *config.Profile, eff config.Effective, home string) ([]MountSpec, error) {
+	var out []MountSpec
+	for _, m := range p.Mounts {
+		src, err := security.ResolveMountSource(m.Source, home)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, MountSpec{Source: src, Target: m.Target, ReadOnly: m.ReadOnly})
+
+		if !m.ReadOnly {
+			protect := append(append([]string{}, m.Protect...), eff.ProtectPaths...)
+			seen := map[string]bool{}
+			for _, sub := range protect {
+				if seen[sub] {
+					continue
+				}
+				seen[sub] = true
+				real, ok, err := insideMount(src, sub)
+				if err != nil {
+					return nil, err
+				}
+				if ok {
+					out = append(out, MountSpec{Source: real, Target: path.Join(m.Target, sub), ReadOnly: true})
+				}
+			}
+		}
+		for _, sub := range m.Hide {
+			real, ok, err := insideMount(src, sub)
+			if err != nil {
+				return nil, err
+			}
+			if !ok {
+				continue
+			}
+			target := path.Join(m.Target, sub)
+			info, err := os.Stat(real)
+			if err != nil {
+				return nil, err
+			}
+			if info.IsDir() {
+				out = append(out, MountSpec{Target: target, Tmpfs: true})
+			} else {
+				out = append(out, MountSpec{Source: "/dev/null", Target: target, ReadOnly: true})
+			}
+		}
+	}
+	return out, nil
+}
+
+// insideMount resolves src/sub and confirms it stays inside src. A missing
+// path is reported as not ok (nothing to protect or hide).
+func insideMount(src, sub string) (string, bool, error) {
+	if err := security.ValidateSubpath(sub); err != nil {
+		return "", false, err
+	}
+	real, err := filepath.EvalSymlinks(filepath.Join(src, filepath.FromSlash(sub)))
+	if os.IsNotExist(err) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	if real != src && !strings.HasPrefix(real, src+string(os.PathSeparator)) {
+		return "", false, fmt.Errorf("%s inside %s is a link that points outside the mount", sub, src)
+	}
+	return real, true, nil
 }
 
 func (r *Runner) execInto(ctx context.Context, containerName string) error {
 	args := append([]string{"exec"}, ttyFlags()...)
-	args = append(args, containerName, "/bin/bash", "-l")
+	args = append(args, containerName, "/usr/local/bin/rig-entrypoint", "/bin/bash", "-l")
 	cmd := exec.CommandContext(ctx, r.bin, args...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
@@ -540,6 +871,22 @@ func (r *Runner) startAttached(ctx context.Context, containerName string) error 
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
+}
+
+// imageOutdated reports whether a container runs an older build of its image.
+func (r *Runner) imageOutdated(ctx context.Context, containerName, tag string) bool {
+	if r.kind == "apple" {
+		return false
+	}
+	cur, err := exec.CommandContext(ctx, r.bin, "image", "inspect", "-f", "{{.Id}}", tag).Output()
+	if err != nil {
+		return false
+	}
+	used, err := exec.CommandContext(ctx, r.bin, "inspect", "-f", "{{.Image}}", containerName).Output()
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(string(cur)) != strings.TrimSpace(string(used))
 }
 
 // ProfileOf returns the profile a container was created from, via its label.
@@ -583,8 +930,7 @@ func (r *Runner) findReusable(ctx context.Context, profileName string) (Containe
 	return ContainerInfo{}, false
 }
 
-// nextInstance picks the lowest unused instance number for a profile, so a
-// destroyed instance's slot is reused instead of the counter climbing forever.
+// nextInstance picks the lowest unused instance number for a profile.
 func (r *Runner) nextInstance(ctx context.Context, profileName string) int {
 	used := make(map[int]bool)
 	prefix := "rig-" + profileName

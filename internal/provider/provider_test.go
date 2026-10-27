@@ -42,18 +42,18 @@ func TestParseCLIStatsBad(t *testing.T) {
 
 func TestDetectPrefersNativePerOS(t *testing.T) {
 	all := func(string) bool { return true }
-	if p := detect("darwin", all); p.Name() != "apple" {
+	if p := detect("darwin", all, false); p.Name() != "apple" {
 		t.Errorf("darwin should prefer apple, got %s", p.Name())
 	}
-	if p := detect("linux", all); p.Name() != "podman" {
+	if p := detect("linux", all, false); p.Name() != "podman" {
 		t.Errorf("linux should prefer podman, got %s", p.Name())
 	}
-	if p := detect("windows", all); p.Name() != "podman" {
+	if p := detect("windows", all, false); p.Name() != "podman" {
 		t.Errorf("windows should prefer podman, got %s", p.Name())
 	}
 	// Falls back down the chain when the preferred one is absent.
 	onlyDocker := func(b string) bool { return b == "docker" }
-	if p := detect("darwin", onlyDocker); p.Name() != "docker" {
+	if p := detect("darwin", onlyDocker, false); p.Name() != "docker" {
 		t.Errorf("should fall back to docker, got %s", p.Name())
 	}
 }
@@ -72,5 +72,36 @@ func TestParseAppleStats(t *testing.T) {
 	}
 	if s.MemBytes != 4317184 || s.MemLimit != 1073741824 || s.PIDs != 3 {
 		t.Errorf("stats = %+v", s)
+	}
+}
+
+func TestDetectPrefersIsolationCapableEngines(t *testing.T) {
+	all := func(string) bool { return true }
+	if p := detect("darwin", all, true); p.Name() != "podman" {
+		t.Errorf("a profile needing network isolation should not get apple, got %s", p.Name())
+	}
+	onlyApple := func(b string) bool { return b == "container" }
+	if p := detect("darwin", onlyApple, true); p.Name() != "apple" {
+		t.Errorf("apple is still the fallback, got %s", p.Name())
+	}
+}
+
+func TestEngineRuntimeMatchers(t *testing.T) {
+	for _, n := range []string{"runsc", "runsc-kvm", "io.containerd.runsc.v1"} {
+		if !IsGVisor(n) {
+			t.Errorf("IsGVisor(%q) = false", n)
+		}
+	}
+	for _, n := range []string{"kata", "kata-qemu", "io.containerd.kata.v2"} {
+		if !IsKata(n) {
+			t.Errorf("IsKata(%q) = false", n)
+		}
+	}
+	if IsGVisor("runc") || IsKata("crun") {
+		t.Error("ordinary runtimes must not match")
+	}
+	info := EngineInfo{Runtimes: []string{"runc", "runsc"}}
+	if name, ok := info.HasRuntime(IsGVisor); !ok || name != "runsc" {
+		t.Errorf("HasRuntime = %q %v", name, ok)
 	}
 }

@@ -2,78 +2,25 @@ package config
 
 import "time"
 
+// DefaultProfile is the starting point for `rig new` without a template:
+// Claude Code at the standard level, with an egress allowlist and a
+// persistent workspace volume.
 func DefaultProfile() Profile {
 	return Profile{
-		Version: 1,
+		Version:  1,
+		Security: SecurityConfig{Level: LevelStandard},
+		Agents: []AgentConfig{
+			{ID: "claude-code", Env: map[string]string{"ANTHROPIC_API_KEY": "${ANTHROPIC_API_KEY}"}},
+		},
+		Tools: []string{"git", "curl", "jq", "ripgrep", "fd-find", "make", "python3", "python3-pip", "python3-venv"},
 		Network: NetworkConfig{
-			Mode: "unrestricted",
+			Mode:    "allowlist",
+			Presets: []string{"github", "npm", "pypi"},
 		},
-		Commands: CommandsConfig{
-			Mode: "unrestricted",
-		},
-		Resources: ResourcesConfig{
-			CPU:      2.0,
-			Memory:   4096,
-			PIDLimit: 512,
-		},
-		Storage: StorageConfig{
-			Size: "10g",
-		},
-		Persistence: "ephemeral",
-		GPU: GPUConfig{
-			Enabled: false,
-		},
-		Tools: []string{"curl", "git", "wget", "jq"},
-		Metadata: Metadata{
-			CreatedAt: time.Now(),
-		},
+		Commands:    CommandsConfig{Mode: "unrestricted"},
+		Resources:   ResourcesConfig{CPU: 2.0, Memory: 4096, PIDLimit: 512},
+		Storage:     StorageConfig{Size: "10g", Volumes: []VolumeMount{{Name: "workspace", Target: "/home/sandbox/workspace"}}},
+		Persistence: "persistent",
+		Metadata:    Metadata{CreatedAt: time.Now()},
 	}
-}
-
-var DefaultTools = []ToolCategory{
-	{
-		Name: "Development",
-		Tools: []Tool{
-			{ID: "git", Name: "git", Package: "git", AlwaysIncluded: true},
-			{ID: "neovim", Name: "neovim", Package: "neovim"},
-			{ID: "tmux", Name: "tmux", Package: "tmux"},
-			{ID: "python3", Name: "Python 3", Package: "python3"},
-			{ID: "python3-pip", Name: "pip", Package: "python3-pip"},
-			{ID: "python3-venv", Name: "venv", Package: "python3-venv"},
-			{ID: "make", Name: "make", Package: "make"},
-			{ID: "build-essential", Name: "build-essential", Package: "build-essential"},
-		},
-	},
-	{
-		Name: "Search & Navigation",
-		Tools: []Tool{
-			{ID: "ripgrep", Name: "ripgrep", Package: "ripgrep"},
-			{ID: "fd-find", Name: "fd", Package: "fd-find"},
-			{ID: "fzf", Name: "fzf", Package: "fzf"},
-			{ID: "tree", Name: "tree", Package: "tree"},
-		},
-	},
-	{
-		Name: "Utilities",
-		Tools: []Tool{
-			{ID: "curl", Name: "curl", Package: "curl", AlwaysIncluded: true},
-			{ID: "wget", Name: "wget", Package: "wget"},
-			{ID: "jq", Name: "jq", Package: "jq"},
-			{ID: "bat", Name: "bat", Package: "bat"},
-			{ID: "htop", Name: "htop", Package: "htop"},
-			{ID: "unzip", Name: "unzip", Package: "unzip"},
-		},
-	},
-}
-
-type ToolCategory struct {
-	Name  string
-	Tools []Tool
-}
-
-type Tool struct {
-	ID             string
-	Name           string
-	Package        string
-	AlwaysIncluded bool
 }

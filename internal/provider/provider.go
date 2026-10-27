@@ -7,9 +7,11 @@ package provider
 
 import (
 	"context"
+	"os"
 	"os/exec"
 	goruntime "runtime"
 	"strings"
+	"sync/atomic"
 )
 
 // Stats is a point-in-time resource sample for one container.
@@ -37,18 +39,38 @@ func Docker() Provider { return &dockerCLI{name: "docker", bin: "docker"} }
 func Podman() Provider { return &dockerCLI{name: "podman", bin: "podman"} }
 func Apple() Provider  { return &appleCLI{} }
 
-// Detect chooses a provider for this OS, preferring the native/daemonless option.
+// preferIsolation makes Detect prefer engines that can enforce network
+// isolation (internal networks, a filtering proxy, a gateway) over Apple's
+// runtime, which cannot yet.
+var preferIsolation atomic.Bool
+
+// PreferIsolationCapable is set by callers launching a profile that needs
+// network isolation.
+func PreferIsolationCapable(b bool) { preferIsolation.Store(b) }
+
+// Detect chooses a provider for this OS, preferring the native/daemonless
+// option. RIG_ENGINE (docker, podman or apple) overrides the choice.
 func Detect() Provider {
+	switch os.Getenv("RIG_ENGINE") {
+	case "docker":
+		return Docker()
+	case "podman":
+		return Podman()
+	case "apple":
+		return Apple()
+	}
 	return detect(goruntime.GOOS, func(bin string) bool {
 		_, err := lookPath(bin)
 		return err == nil
-	})
+	}, preferIsolation.Load())
 }
 
-func detect(goos string, has func(string) bool) Provider {
+func detect(goos string, has func(string) bool, isolation bool) Provider {
 	var order []Provider
-	switch goos {
-	case "darwin":
+	switch {
+	case goos == "darwin" && isolation:
+		order = []Provider{Podman(), Docker(), Apple()}
+	case goos == "darwin":
 		order = []Provider{Apple(), Podman(), Docker()}
 	default: // linux, windows, and anything else
 		order = []Provider{Podman(), Docker()}

@@ -36,3 +36,22 @@ func TestSplitContainerRef(t *testing.T) {
 		}
 	}
 }
+
+func TestSafeText(t *testing.T) {
+	cases := map[string]string{
+		"blocked example.org":          "blocked example.org",
+		"clear\x1b[2Jscreen":           "clear\\u001b[2Jscreen",
+		"title\x1b]0;pwned\x07":        "title\\u001b]0;pwned\\u0007",
+		"line\nbreak":                  "line\\u000abreak",
+		"bidi \u202egnp.exe":           "bidi \\u202egnp.exe",
+		"c1 \u009b31m":                 "c1 \\u009b31m",
+		"tab\there":                    "tab here",
+		"accents café ✓":               "accents café ✓",
+		string([]byte{'b', 0xff, 'd'}): "b\uFFFDd",
+	}
+	for in, want := range cases {
+		if got := safeText(in); got != want {
+			t.Errorf("safeText(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

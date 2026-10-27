@@ -34,8 +34,8 @@ type fakeProvider struct {
 	killed   []string
 }
 
-func (f *fakeProvider) Name() string  { return "fake" }
-func (f *fakeProvider) Bin() string   { return "fake" }
+func (f *fakeProvider) Name() string    { return "fake" }
+func (f *fakeProvider) Bin() string     { return "fake" }
 func (f *fakeProvider) Available() bool { return true }
 func (f *fakeProvider) Stats(ctx context.Context, name string) (provider.Stats, error) {
 	return provider.Stats{MemBytes: f.memBytes}, nil
@@ -86,3 +86,5 @@ func TestMonitorObserveModeDoesNotKill(t *testing.T) {
 		t.Fatalf("observe mode must not kill, got %v", fp.killed)
 	}
 }
+
+func providerStats(pids int) provider.Stats { return provider.Stats{PIDs: pids} }

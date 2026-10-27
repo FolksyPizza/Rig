@@ -41,6 +41,7 @@ func (s *Store) path(name string) (string, error) {
 }
 
 func (s *Store) Save(p *Profile) error {
+	p.Normalize()
 	if err := p.Validate(); err != nil {
 		return err
 	}
@@ -71,6 +72,7 @@ func (s *Store) Load(name string) (*Profile, error) {
 	}
 	// A profile on disk may have been hand-edited or written by an older
 	// version, so it is validated on the way in as well as on the way out.
+	p.Normalize()
 	if err := p.Validate(); err != nil {
 		return nil, fmt.Errorf("profile %q is invalid: %w", name, err)
 	}
