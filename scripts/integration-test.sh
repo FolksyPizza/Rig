@@ -46,7 +46,7 @@ expect_output() {
 }
 
 cleanup() {
-	for name in std tight safe mcp relay cc; do "$rig" rm "$name" --all --yes >/dev/null 2>&1 || true; done
+	for name in std tight safe mcp gwmcp relay cc; do "$rig" rm "$name" --all --yes >/dev/null 2>&1 || true; done
 	[ -n "${web_pid:-}" ] && kill "$web_pid" 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -148,6 +148,53 @@ guard="printf '%s\n' '$calls' | rig-helper mcp-guard --policy /etc/rig/mcp/fake.
 if grep -q '"name":"echo"' "$work/out" && ! grep -q '"name":"danger"' "$work/out"; then pass "a denied tool is hidden from the tool list"; else fail "a denied tool is hidden from the tool list"; show; fi
 if grep -q 'server ran echo' "$work/out" && [ "$(grep -c 'server ran danger' "$work/out")" = 0 ]; then pass "allowed calls run; denied and ambiguous calls never reach the server"; else fail "allowed calls run; denied and ambiguous calls never reach the server"; show; fi
 expect_output "MCP calls are in the audit log" 'mcp_tool_blocked' "$rig" audit mcp
+
+echo "== gateway MCP server"
+# A server in the gateway receives its ${VAR} secret; the sandbox reaches it
+# only through the guard and never sees the secret itself.
+cat >"$work/vault.py" <<'EOF'
+import json, os, sys
+for line in sys.stdin:
+    msg = json.loads(line)
+    if "id" not in msg:
+        continue
+    if msg.get("method") == "initialize":
+        result = {"protocolVersion": "2025-06-18", "capabilities": {"tools": {}}}
+    else:
+        result = {"content": [{"type": "text", "text": "secret=" + os.environ.get("SECRET", "")}]}
+    print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": result}), flush=True)
+EOF
+vault_src="$(base64 -w0 "$work/vault.py")"
+cat >"$work/gwmcp.yaml" <<EOF
+version: 1
+name: gwmcp
+security: {level: standard}
+agents: [{id: testagent}]
+tools: [curl, python3]
+network: {mode: allowlist}
+mcp:
+  servers:
+    - name: vault
+      command: [python3, -c, "import base64; exec(base64.b64decode('$vault_src'))"]
+      run_in: gateway
+      env: {SECRET: "\${RIG_IT_SECRET}"}
+      allow_tools: [reveal]
+commands: {mode: unrestricted}
+resources: {cpu: 1, memory: 1024, pids_limit: 256}
+storage: {size: 5g}
+persistence: ephemeral
+EOF
+"$rig" import "$work/gwmcp.yaml" >/dev/null
+cat >"$work/mcp-call.sh" <<'EOF'
+url=http://rig-gw:8800/mcp/vault
+sid=$(curl -sS -D - -o /dev/null -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' "$url" | tr -d '\r' | sed -n 's/^[Mm]cp-[Ss]ession-[Ii]d: //p')
+curl -sS -H "Mcp-Session-Id: $sid" -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"reveal","arguments":{}}}' "$url"
+EOF
+mcp_call="$(cat "$work/mcp-call.sh")"
+expect_output "a gateway MCP server receives its secret" 'secret=it-works' env RIG_IT_SECRET=it-works "$rig" run gwmcp -- sh -c "$mcp_call"
+expect_output "the sandbox never sees that secret" '^absent$' env RIG_IT_SECRET=it-works "$rig" run gwmcp -- sh -c 'env | grep -q it-works && echo present || echo absent'
 
 echo "== host ports"
 echo "hello from the host" >"$work/www/index.html"

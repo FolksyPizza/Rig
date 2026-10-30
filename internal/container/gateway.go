@@ -177,29 +177,7 @@ func (r *Runner) StartGateway(ctx context.Context, p *config.Profile, opts Gatew
 	}
 	defer cleanup()
 
-	args := []string{
-		"run", "-i", "--rm",
-		"--name", name,
-		"--network", opts.Network,
-		"--network-alias", GatewayHost,
-		"--hostname", GatewayHost,
-		"--label", LabelProfile + "=" + p.Name,
-		"--label", LabelRole + "=gateway",
-		"--read-only",
-		"--tmpfs", "/tmp:rw,nosuid,nodev,size=256m,mode=1777",
-		"--tmpfs", fmt.Sprintf("%s:rw,nosuid,nodev,size=512m,uid=%d,gid=%d,mode=0755", sandboxHome, sandboxUID, sandboxUID),
-		"--cap-drop", "ALL",
-		"--security-opt", "no-new-privileges",
-		"--pids-limit", "256",
-		"--memory", "1g",
-		"--cpus", "1",
-		"--env-file", envFile,
-		"-v", dir + ":/etc/rig-gw:ro",
-	}
-	if opts.Runtime != "" {
-		args = append(args, "--runtime", opts.Runtime)
-	}
-	args = append(args, opts.Image, "rig-helper", "gateway", "--config", "/etc/rig-gw/gateway.json")
+	args := gatewayRunArgs(p.Name, name, envFile, dir, opts)
 
 	cmd := exec.Command(r.bin, args...)
 	stdin, err := cmd.StdinPipe()
@@ -313,4 +291,35 @@ func writeEnvMap(env map[string]string) (string, func(), error) {
 		return "", func() {}, err
 	}
 	return path, cleanup, nil
+}
+
+// gatewayRunArgs builds the gateway's run command. It starts rig-helper
+// directly rather than through the sandbox entrypoint, which moves RIG_MCP_*
+// variables out of the environment: the gateway reads its MCP servers'
+// secrets from exactly those variables.
+func gatewayRunArgs(profileName, name, envFile, configDir string, opts GatewayOptions) []string {
+	args := []string{
+		"run", "-i", "--rm",
+		"--name", name,
+		"--network", opts.Network,
+		"--network-alias", GatewayHost,
+		"--hostname", GatewayHost,
+		"--label", LabelProfile + "=" + profileName,
+		"--label", LabelRole + "=gateway",
+		"--read-only",
+		"--tmpfs", "/tmp:rw,nosuid,nodev,size=256m,mode=1777",
+		"--tmpfs", fmt.Sprintf("%s:rw,nosuid,nodev,size=512m,uid=%d,gid=%d,mode=0755", sandboxHome, sandboxUID, sandboxUID),
+		"--cap-drop", "ALL",
+		"--security-opt", "no-new-privileges",
+		"--pids-limit", "256",
+		"--memory", "1g",
+		"--cpus", "1",
+		"--env-file", envFile,
+		"-v", configDir + ":/etc/rig-gw:ro",
+		"--entrypoint", "/usr/local/bin/rig-helper",
+	}
+	if opts.Runtime != "" {
+		args = append(args, "--runtime", opts.Runtime)
+	}
+	return append(args, opts.Image, "gateway", "--config", "/etc/rig-gw/gateway.json")
 }

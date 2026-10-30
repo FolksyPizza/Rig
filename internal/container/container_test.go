@@ -835,3 +835,19 @@ func TestNames(t *testing.T) {
 		}
 	}
 }
+
+// The gateway must not run through the sandbox entrypoint, which unsets the
+// RIG_MCP_* variables that carry its MCP servers' secrets.
+func TestGatewayBypassesTheSandboxEntrypoint(t *testing.T) {
+	args := gatewayRunArgs("work", "rig-gw-work", "/tmp/env", "/tmp/gw", GatewayOptions{Image: "rig/work:latest", Network: "rig-net-work", Runtime: "runsc"})
+	joined := strings.Join(args, " ")
+	if !argsContainPair(args, "--entrypoint", "/usr/local/bin/rig-helper") {
+		t.Fatalf("gateway must start rig-helper directly: %s", joined)
+	}
+	if !strings.HasSuffix(joined, "rig/work:latest gateway --config /etc/rig-gw/gateway.json") {
+		t.Errorf("unexpected command after the image: %s", joined)
+	}
+	if !argsContainPair(args, "--runtime", "runsc") {
+		t.Error("the gateway runs under the sandbox's runtime")
+	}
+}
