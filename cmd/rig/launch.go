@@ -179,6 +179,9 @@ func launch(profile *config.Profile, opts container.RunOptions) error {
 	if !eff.Ephemeral && cause == nil {
 		finishSession(runner, profile.Name, prepared.Name, len(opts.Command) > 0)
 	}
+	if gw != nil && !gw.Shared && cause == nil {
+		keepGatewayForOthers(ctx, profile.Name)
+	}
 	gw.Stop()
 	teardownIfIdle(runner, nm, profile.Name)
 
@@ -193,6 +196,25 @@ func launch(profile *config.Profile, opts container.RunOptions) error {
 		return exitError{code: xe.ExitCode()}
 	}
 	return runErr
+}
+
+// keepGatewayForOthers keeps this process, and the gateway it runs, alive
+// while other sessions of the profile still use it: the gateway's host-port
+// relay runs through this process, so they would lose MCP servers, the git
+// broker and host ports if it exited. Ctrl-C stops waiting.
+func keepGatewayForOthers(ctx context.Context, profileName string) {
+	announced := false
+	for len(profileSessions(profileName)) > 0 {
+		if !announced {
+			fmt.Printf("  Other sessions of %s still use its gateway; keeping it up until they end (Ctrl-C stops it now).\n", profileName)
+			announced = true
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(2 * time.Second):
+		}
+	}
 }
 
 // finishSession stops a persistent sandbox when the last session leaves it,

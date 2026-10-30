@@ -70,6 +70,18 @@ func (s *session) close() {
 // otherSessions returns the PIDs of other live Rig processes attached to a
 // container, removing records left by processes that have exited.
 func otherSessions(profile, container string) []int {
+	return liveSessions(profile, container)
+}
+
+// profileSessions returns the PIDs of other live Rig processes attached to
+// any container of a profile. They share its gateway.
+func profileSessions(profile string) []int {
+	return liveSessions(profile, "")
+}
+
+// liveSessions finds other live sessions on one container, or on every
+// container of the profile when container is empty.
+func liveSessions(profile, container string) []int {
 	dir, err := sessionDir(profile)
 	if err != nil {
 		return nil
@@ -82,7 +94,7 @@ func otherSessions(profile, container string) []int {
 	for _, e := range entries {
 		name := e.Name()
 		i := strings.LastIndexByte(name, '.')
-		if i <= 0 || name[:i] != container {
+		if i <= 0 || (container != "" && name[:i] != container) || strings.HasSuffix(name, ".keep") {
 			continue
 		}
 		pid, err := strconv.Atoi(name[i+1:])
