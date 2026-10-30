@@ -17,9 +17,25 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  docker-gvisor:
+  integration:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Docker with gVisor: every level, lockdown included.
+          - engine: docker
+            gvisor: true
+            skip: ""
+          # Rootless Podman (installed on the runner) without gVisor.
+          - engine: podman
+            gvisor: false
+            skip: gvisor
+    name: ${{ matrix.engine }}${{ matrix.gvisor && ' + gVisor' || '' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    env:
+      RIG_ENGINE: ${{ matrix.engine }}
+      RIG_IT_SKIP: ${{ matrix.skip }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -31,6 +47,7 @@ jobs:
           cache: true
 
       - name: Install gVisor
+        if: matrix.gvisor
         env:
           # A pinned release, checked against its published SHA-512.
           GVISOR_RELEASE: "20261026.0"
