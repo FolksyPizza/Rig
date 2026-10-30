@@ -36,11 +36,20 @@ func ResolveIsolation(eff config.Effective, info provider.EngineInfo) (Isolation
 
 	gvisor, hasGVisor := info.HasRuntime(provider.IsGVisor)
 	kata, hasKata := info.HasRuntime(provider.IsKata)
+	// runsc cannot create containers under rootless Podman (it needs the
+	// systemd cgroup manager as root), so it does not count there.
+	gvisorBroken := hasGVisor && info.Name == "podman" && info.Rootless
+	if gvisorBroken {
+		hasGVisor = false
+	}
 
 	switch eff.Isolation {
 	case config.IsolationContainer:
 		return Isolation{Level: config.IsolationContainer}, nil
 	case config.IsolationGVisor:
+		if gvisorBroken {
+			return Isolation{}, fmt.Errorf("security.isolation is gvisor, but gVisor cannot run under rootless Podman; use Docker or rootful Podman with gVisor, or isolation vm")
+		}
 		if !hasGVisor {
 			return Isolation{}, fmt.Errorf("security.isolation is gvisor, but %s has no gVisor runtime (runsc); run 'rig doctor' for setup steps", info.Name)
 		}

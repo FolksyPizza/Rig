@@ -457,6 +457,10 @@ func doctorEngine(d *doctorReport, info provider.EngineInfo) {
 
 	gv, hasGV := info.HasRuntime(provider.IsGVisor)
 	kata, hasKata := info.HasRuntime(provider.IsKata)
+	if hasGV && info.Name == "podman" && info.Rootless {
+		d.line("warn", "gVisor is installed, but it cannot run under rootless Podman, so Rig does not use it here.\nUse Docker or rootful Podman for gVisor.")
+		hasGV = false
+	}
 	switch {
 	case hasGV && hasKata:
 		d.line("ok", fmt.Sprintf("gVisor (%s) and Kata VMs (%s) are installed: strict and lockdown sandboxes use them", gv, kata))
