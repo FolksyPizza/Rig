@@ -490,6 +490,10 @@ func TestBuildCreateArgsIsolationRuntime(t *testing.T) {
 	if !argsContainPair(args, "--add-host", ProxyAlias+":172.30.0.2") {
 		t.Error("gVisor sandboxes should reach the proxy by address")
 	}
+	s.Gateway, s.GatewayIP = true, "172.30.0.3"
+	if args := (&Runner{}).buildCreateArgs(s, createOpts{name: "rig-demo"}); !argsContainPair(args, "--add-host", GatewayHost+":172.30.0.3") {
+		t.Error("gVisor sandboxes should reach the gateway by address")
+	}
 	if !argsContainPair(args, "--label", "rig.isolation=gvisor") {
 		t.Error("isolation should be recorded on the container")
 	}
@@ -849,5 +853,23 @@ func TestGatewayBypassesTheSandboxEntrypoint(t *testing.T) {
 	}
 	if !argsContainPair(args, "--runtime", "runsc") {
 		t.Error("the gateway runs under the sandbox's runtime")
+	}
+}
+
+func TestResolveIsolationSkipsGVisorUnderRootlessPodman(t *testing.T) {
+	info := provider.EngineInfo{Name: "podman", Rootless: true, Runtimes: []string{"crun", "runsc"}}
+	auto := (&config.Profile{Security: config.SecurityConfig{Level: config.LevelStandard}}).Resolve()
+	iso, err := ResolveIsolation(auto, info)
+	if err != nil || iso.Level != config.IsolationContainer {
+		t.Errorf("auto under rootless Podman should not pick gVisor: %+v %v", iso, err)
+	}
+	explicit := auto
+	explicit.Isolation = config.IsolationGVisor
+	if _, err := ResolveIsolation(explicit, info); err == nil {
+		t.Error("asking for gVisor under rootless Podman should explain why it cannot work")
+	}
+	info.Rootless = false
+	if iso, _ := ResolveIsolation(auto, info); iso.Level != config.IsolationGVisor {
+		t.Errorf("rootful Podman can use gVisor: %+v", iso)
 	}
 }

@@ -114,6 +114,10 @@ type LaunchSpec struct {
 	Isolation Isolation
 	Network   *NetworkSetup // nil unless allowlist mode
 	Gateway   bool          // a gateway runs for this profile
+	// GatewayIP is the gateway's address on the sandbox network. gVisor and
+	// VM sandboxes cannot use the engine's DNS, so they get it as a hosts
+	// entry.
+	GatewayIP string
 }
 
 // Prepared is a sandbox ready to be entered.
@@ -140,6 +144,7 @@ func (r *Runner) Prepare(ctx context.Context, spec LaunchSpec, opts RunOptions) 
 					return nil, fmt.Errorf("start container %s: %s", c.Name, strings.TrimSpace(string(out)))
 				}
 			}
+			r.refreshHosts(ctx, spec, c.Name)
 			return &Prepared{Name: c.Name}, nil
 		}
 		return nil, fmt.Errorf("container %s is not an instance of sandbox %s", opts.Container, profile.Name)
@@ -161,6 +166,7 @@ func (r *Runner) Prepare(ctx context.Context, spec LaunchSpec, opts RunOptions) 
 						return nil, fmt.Errorf("start container %s: %s", existing.Name, strings.TrimSpace(string(out)))
 					}
 				}
+				r.refreshHosts(ctx, spec, existing.Name)
 				return &Prepared{Name: existing.Name}, nil
 			}
 		}
@@ -641,8 +647,10 @@ func (r *Runner) buildCreateArgs(spec LaunchSpec, o createOpts) []string {
 			args = append(args, "--network", spec.Network.Network)
 			// gVisor and VM runtimes may not see the engine's embedded DNS,
 			// so give them the proxy's address directly.
-			if spec.Isolation.Level != config.IsolationContainer && spec.Network.ProxyIP != "" {
-				args = append(args, "--add-host", ProxyAlias+":"+spec.Network.ProxyIP)
+			if spec.Isolation.Level != config.IsolationContainer {
+				for _, h := range hostEntries(spec) {
+					args = append(args, "--add-host", h[0]+":"+h[1])
+				}
 			}
 		}
 	case "none":
@@ -962,4 +970,46 @@ func ResolveContainerName(ctx context.Context, r *Runner, name string) (string, 
 		return withPrefix, nil
 	}
 	return "", fmt.Errorf("container %q not found (tried %q and %q)", name, name, withPrefix)
+}
+
+// hostEntries are the names a gVisor or VM sandbox reaches by address: the
+// egress proxy and, when one runs, the gateway.
+func hostEntries(spec LaunchSpec) [][2]string {
+	var out [][2]string
+	if spec.Network != nil && spec.Network.ProxyIP != "" {
+		out = append(out, [2]string{ProxyAlias, spec.Network.ProxyIP})
+	}
+	if spec.Gateway && spec.GatewayIP != "" {
+		out = append(out, [2]string{GatewayHost, spec.GatewayIP})
+	}
+	return out
+}
+
+// refreshHosts rewrites the proxy and gateway entries in a reused gVisor or
+// VM sandbox's hosts file. The gateway is started anew for each session and
+// its address can change; entries given at creation would go stale.
+func (r *Runner) refreshHosts(ctx context.Context, spec LaunchSpec, name string) {
+	entries := hostEntries(spec)
+	if spec.Isolation.Level == config.IsolationContainer || len(entries) == 0 || r.kind == "apple" {
+		return
+	}
+	script := `grep -vE "[[:space:]](` + ProxyAlias + `|` + GatewayHost + `)$" /etc/hosts > /tmp/.rig-hosts; ` +
+		`cat /tmp/.rig-hosts > /etc/hosts; rm -f /tmp/.rig-hosts; printf '%s\n' "$@" >> /etc/hosts`
+	args := []string{"exec", "-u", "0", name, "sh", "-c", script, "sh"}
+	for _, e := range entries {
+		args = append(args, e[1]+" "+e[0])
+	}
+	if out, err := exec.CommandContext(ctx, r.bin, args...).CombinedOutput(); err != nil {
+		fmt.Fprintf(os.Stderr, "  Warning: could not update the proxy and gateway addresses in %s: %s\n", name, strings.TrimSpace(string(out)))
+	}
+}
+
+// ContainerIP is a container's address on a network, or "" if it has none.
+func (r *Runner) ContainerIP(ctx context.Context, name, network string) string {
+	out, err := exec.CommandContext(ctx, r.bin, "inspect", "-f",
+		`{{with index .NetworkSettings.Networks "`+network+`"}}{{.IPAddress}}{{end}}`, name).Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }

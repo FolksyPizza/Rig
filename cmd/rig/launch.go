@@ -140,6 +140,9 @@ func launch(profile *config.Profile, opts container.RunOptions) error {
 	}
 
 	spec := container.LaunchSpec{Profile: profile, Effective: eff, Isolation: iso, Network: setup, Gateway: eff.NeedsGateway}
+	if eff.NeedsGateway && setup != nil {
+		spec.GatewayIP = runner.ContainerIP(ctx, container.GatewayName(profile.Name), setup.Network)
+	}
 	prepared, err := runner.Prepare(ctx, spec, opts)
 	if err != nil {
 		gw.Stop()
