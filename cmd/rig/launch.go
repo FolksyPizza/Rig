@@ -272,9 +272,11 @@ func startMonitor(ctx context.Context, profile *config.Profile, eff config.Effec
 	const mcpLog = "/home/sandbox/.rig/mcp-audit.jsonl"
 	mcpTail := []string{"tail", "-n", "+1", "-F", mcpLog}
 	started := time.Now().Add(-2 * time.Second)
+	podman := runner.Engine() == "podman"
 	sources := []watchdog.Observer{
-		monitor.ProcessSource{Rules: rules, Engine: bin, Podman: runner.Engine() == "podman", Container: name,
-			Ignore: func(comm, args string) bool { return comm == "tail" && args == strings.Join(mcpTail, " ") }},
+		monitor.ProcessSource{Rules: rules, Engine: bin, Podman: podman, Container: name,
+			InSandbox: monitor.IsolatedRuntime(ctx, bin, name, podman),
+			Ignore:    func(comm, args string) bool { return comm == "tail" && args == strings.Join(mcpTail, " ") }},
 		monitor.ResourceObserver{Provider: prov, Container: name, MemLimitBytes: profile.Resources.Memory << 20, PIDLimit: profile.Resources.PIDLimit},
 	}
 	if setup != nil {

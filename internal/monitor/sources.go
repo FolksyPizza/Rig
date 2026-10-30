@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/FolksyPizza/rig/internal/provider"
 	"github.com/FolksyPizza/rig/internal/watchdog"
 )
 
@@ -116,11 +117,22 @@ type ProcessSource struct {
 	// Ignore skips processes Rig itself started in the sandbox, such as the
 	// monitor's own log reader. It gets the command name and arguments.
 	Ignore func(comm, args string) bool
+	// InSandbox lists processes by running ps inside the sandbox instead of
+	// asking the engine (docker top). Under gVisor or a VM the engine's top
+	// looks up the runtime's process IDs on the host, where those processes
+	// do not exist, so it cannot see what the sandbox runs.
+	InSandbox bool
 }
+
+// sandboxPS is the command InSandbox runs; its own process is skipped.
+var sandboxPS = []string{"ps", "-eo", "pid=,comm=,args="}
 
 func (s ProcessSource) list(ctx context.Context) ([][2]string, error) {
 	args := []string{"top", s.Container, "-eo", "pid,comm,args"}
-	if s.Podman {
+	switch {
+	case s.InSandbox:
+		args = append([]string{"exec", s.Container}, sandboxPS...)
+	case s.Podman:
 		args = []string{"top", s.Container, "pid", "comm", "args"}
 	}
 	out, err := exec.CommandContext(ctx, s.Engine, args...).Output()
@@ -130,7 +142,7 @@ func (s ProcessSource) list(ctx context.Context) ([][2]string, error) {
 	var procs [][2]string // pid, "comm\x00args"
 	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
 	for i, line := range lines {
-		if i == 0 {
+		if i == 0 && !s.InSandbox {
 			continue // header
 		}
 		f := strings.Fields(line)
@@ -186,6 +198,9 @@ func (s ProcessSource) Observe(ctx context.Context) (<-chan watchdog.Observation
 				if s.Ignore != nil && s.Ignore(comm, args) {
 					continue
 				}
+				if s.InSandbox && comm == "ps" && args == strings.Join(sandboxPS, " ") {
+					continue
+				}
 				o := s.Rules.Process(comm, args)
 				if o.Severity == watchdog.SevInfo {
 					if reported >= max {
@@ -202,4 +217,19 @@ func (s ProcessSource) Observe(ctx context.Context) (<-chan watchdog.Observation
 		}
 	}()
 	return out, nil
+}
+
+// IsolatedRuntime reports whether a container runs under gVisor or in a VM,
+// where the engine's top cannot list its processes (see InSandbox).
+func IsolatedRuntime(ctx context.Context, engine, container string, podman bool) bool {
+	format := "{{.HostConfig.Runtime}}"
+	if podman {
+		format = "{{.OCIRuntime}}"
+	}
+	out, err := exec.CommandContext(ctx, engine, "inspect", "-f", format, container).Output()
+	if err != nil {
+		return false
+	}
+	rt := strings.TrimSpace(string(out))
+	return provider.IsGVisor(rt) || provider.IsKata(rt)
 }
