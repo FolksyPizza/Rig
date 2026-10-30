@@ -176,3 +176,23 @@ func TestChildEnvExpandsSecretsAndWithholdsTheGitToken(t *testing.T) {
 		t.Error("the git token must not reach MCP servers")
 	}
 }
+
+// Without host ports there is no relay, but closing stdin must still end the
+// gateway: that is how rig stops it when the session ends.
+func TestRunEndsWhenStdinClosesWithoutPorts(t *testing.T) {
+	in, w := io.Pipe()
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(context.Background(), Config{Listen: "127.0.0.1:" + strconv.Itoa(freePort(t))}, in, io.Discard, &lockedBuf{}, func(string) string { return "" })
+	}()
+	time.Sleep(100 * time.Millisecond)
+	_ = w.Close()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the gateway kept running after stdin closed")
+	}
+}

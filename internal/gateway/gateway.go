@@ -233,6 +233,17 @@ func Run(ctx context.Context, cfg Config, stdin io.Reader, stdout io.Writer, log
 		}
 	}
 
+	if relayDone == nil && stdin != nil {
+		// No ports to relay, but stdin is still how rig ends the gateway:
+		// the rig process closes it when the session is over.
+		eof := make(chan struct{})
+		go func() {
+			_, _ = io.Copy(io.Discard, stdin)
+			close(eof)
+		}()
+		relayDone = eof
+	}
+
 	select {
 	case <-ctx.Done():
 	case <-relayDone:
