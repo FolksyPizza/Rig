@@ -236,7 +236,8 @@ func (nm *NetworkManager) ensureNetwork(ctx context.Context, name string, intern
 			Internal bool              `json:"Internal"`
 			Options  map[string]string `json:"Options"`
 			// Podman spells it in lower case.
-			InternalLower bool `json:"internal"`
+			InternalLower bool  `json:"internal"`
+			DNSEnabled    *bool `json:"dns_enabled"`
 		}
 		if json.Unmarshal(out, &info) != nil || len(info) == 0 {
 			return fmt.Errorf("could not read network %q", name)
@@ -245,24 +246,36 @@ func (nm *NetworkManager) ensureNetwork(ctx context.Context, name string, intern
 		if got != internal {
 			return fmt.Errorf("network %q already exists with internal=%v, expected internal=%v; remove it with '%s network rm %s' and retry", name, got, internal, nm.bin, name)
 		}
-		if internal && nm.name == "docker" && info[0].Options["com.docker.network.bridge.inhibit_ipv4"] != "true" {
-			// Made by an older Rig: the host is reachable from it. Recreate
-			// it if nothing is attached; otherwise refuse.
-			if rmOut, rmErr := exec.CommandContext(ctx, nm.bin, "network", "rm", name).CombinedOutput(); rmErr != nil {
-				return fmt.Errorf("network %q lets sandboxes reach services on your host and is still in use; stop its sandboxes ('rig rm') and retry: %s", name, strings.TrimSpace(string(rmOut)))
-			}
-		} else {
+		outdated := ""
+		switch {
+		case internal && nm.name == "docker" && info[0].Options["com.docker.network.bridge.inhibit_ipv4"] != "true":
+			outdated = "lets sandboxes reach services on your host"
+		case internal && nm.name == "podman" && (info[0].DNSEnabled == nil || *info[0].DNSEnabled):
+			outdated = "answers DNS queries for outside names"
+		}
+		if outdated == "" {
 			return nil
+		}
+		// Made by an older Rig. Recreate it if nothing is attached;
+		// otherwise refuse.
+		if rmOut, rmErr := exec.CommandContext(ctx, nm.bin, "network", "rm", name).CombinedOutput(); rmErr != nil {
+			return fmt.Errorf("network %q %s and is still in use; stop its sandboxes ('rig rm') and retry: %s", name, outdated, strings.TrimSpace(string(rmOut)))
 		}
 	}
 
 	args := []string{"network", "create"}
 	if internal {
 		args = append(args, "--internal")
-		if nm.name == "docker" {
+		switch nm.name {
+		case "docker":
 			// No address for the host on this bridge: without it the sandbox
 			// could connect to anything listening on the host's interfaces.
 			args = append(args, "-o", "com.docker.network.bridge.inhibit_ipv4=true")
+		case "podman":
+			// Podman's DNS server forwards outside names even on internal
+			// networks, which would give sandboxes a DNS channel out. Rig
+			// gives them the proxy's and gateway's addresses directly.
+			args = append(args, "--disable-dns")
 		}
 	}
 	args = append(args, "--label", "rig.managed=true", name)

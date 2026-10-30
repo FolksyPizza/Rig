@@ -873,3 +873,26 @@ func TestResolveIsolationSkipsGVisorUnderRootlessPodman(t *testing.T) {
 		t.Errorf("rootful Podman can use gVisor: %+v", iso)
 	}
 }
+
+func TestPodmanSandboxesAvoidEngineDNSAndExtraTmpfs(t *testing.T) {
+	p := testProfile()
+	p.Security.Level = config.LevelStrict
+	s := spec(p)
+	s.Effective = p.Resolve()
+	s.Network = &NetworkSetup{Network: "rig-net-demo", ProxyIP: "10.89.0.2"}
+	s.Gateway, s.GatewayIP = true, "10.89.0.3"
+	args := (&Runner{name: "podman"}).buildCreateArgs(s, createOpts{name: "rig-demo"})
+	if !argsContainPair(args, "--add-host", ProxyAlias+":10.89.0.2") || !argsContainPair(args, "--add-host", GatewayHost+":10.89.0.3") {
+		t.Errorf("Podman sandboxes reach the proxy and gateway by address: %v", args)
+	}
+	if !argsContain(args, "--read-only-tmpfs=false") {
+		t.Error("Podman must not add writable tmpfs mounts to a read-only image")
+	}
+	if args := (&Runner{name: "docker"}).buildCreateArgs(s, createOpts{name: "rig-demo"}); argsContain(args, "--read-only-tmpfs=false") || argsContain(args, "--add-host") {
+		t.Errorf("Docker containers use the engine's DNS and plain --read-only: %v", args)
+	}
+	gw := gatewayRunArgs("demo", "rig-gw-demo", "/e", "/c", GatewayOptions{Image: "rig/demo", Network: "rig-net-demo", ProxyIP: "10.89.0.2"})
+	if !argsContainPair(gw, "--add-host", ProxyAlias+":10.89.0.2") {
+		t.Error("the gateway reaches the proxy by address")
+	}
+}

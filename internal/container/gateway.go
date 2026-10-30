@@ -114,6 +114,10 @@ type GatewayOptions struct {
 	Network string
 	Token   string // egress proxy credential
 	Runtime string // isolation runtime, same as the sandbox
+	// ProxyIP is the egress proxy's address. The gateway reaches the proxy
+	// by address because gVisor, VMs and Podman's DNS-less internal networks
+	// cannot look its name up.
+	ProxyIP string
 	// OnLog receives each audit line the gateway writes.
 	OnLog func(line []byte)
 }
@@ -197,10 +201,17 @@ func (r *Runner) StartGateway(ctx context.Context, p *config.Profile, opts Gatew
 	}
 	g := &Gateway{cmd: cmd, stdin: stdin, done: make(chan struct{})}
 
+	var tailMu sync.Mutex
+	var tail []string // the last lines it wrote, for startup errors
 	go func() {
 		sc := bufio.NewScanner(stderr)
 		sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
 		for sc.Scan() {
+			tailMu.Lock()
+			if tail = append(tail, sc.Text()); len(tail) > 12 {
+				tail = tail[1:]
+			}
+			tailMu.Unlock()
 			if opts.OnLog != nil {
 				opts.OnLog(append([]byte{}, sc.Bytes()...))
 			}
@@ -237,6 +248,12 @@ func (r *Runner) StartGateway(ctx context.Context, p *config.Profile, opts Gatew
 
 	if err := r.waitForGateway(ctx, name, g.done); err != nil {
 		g.Stop()
+		time.Sleep(200 * time.Millisecond) // let the last lines arrive
+		tailMu.Lock()
+		defer tailMu.Unlock()
+		if len(tail) > 0 {
+			return nil, fmt.Errorf("%w; its last output:\n  %s", err, strings.Join(tail, "\n  "))
+		}
 		return nil, err
 	}
 	return g, nil
@@ -247,7 +264,7 @@ func (r *Runner) waitForGateway(ctx context.Context, name string, exited <-chan 
 	for time.Now().Before(deadline) {
 		select {
 		case <-exited:
-			return fmt.Errorf("gateway %s exited during startup (check 'rig audit' for its log)", name)
+			return fmt.Errorf("gateway %s exited during startup", name)
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
@@ -320,6 +337,9 @@ func gatewayRunArgs(profileName, name, envFile, configDir string, opts GatewayOp
 	}
 	if opts.Runtime != "" {
 		args = append(args, "--runtime", opts.Runtime)
+	}
+	if opts.ProxyIP != "" {
+		args = append(args, "--add-host", ProxyAlias+":"+opts.ProxyIP)
 	}
 	return append(args, opts.Image, "gateway", "--config", "/etc/rig-gw/gateway.json")
 }

@@ -126,6 +126,7 @@ func launch(profile *config.Profile, opts container.RunOptions) error {
 			Network: setup.Network,
 			Token:   setup.GatewayToken,
 			Runtime: iso.Runtime,
+			ProxyIP: setup.ProxyIP,
 			OnLog: func(line []byte) {
 				select {
 				case gwLines <- line:

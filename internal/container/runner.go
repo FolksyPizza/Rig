@@ -608,6 +608,10 @@ func (r *Runner) buildCreateArgs(spec LaunchSpec, o createOpts) []string {
 
 	if eff.ReadOnlyRoot {
 		args = append(args, "--read-only")
+		if r.name == "podman" {
+			// Podman otherwise mounts writable tmpfs on /var/tmp and /run.
+			args = append(args, "--read-only-tmpfs=false")
+		}
 		tmp := "/tmp:rw,nosuid,nodev,size=1g,mode=1777"
 		if eff.NoExecTmp {
 			tmp = "/tmp:rw,nosuid,nodev,noexec,size=1g,mode=1777"
@@ -647,7 +651,7 @@ func (r *Runner) buildCreateArgs(spec LaunchSpec, o createOpts) []string {
 			args = append(args, "--network", spec.Network.Network)
 			// gVisor and VM runtimes may not see the engine's embedded DNS,
 			// so give them the proxy's address directly.
-			if spec.Isolation.Level != config.IsolationContainer {
+			if r.needsHostEntries(spec) {
 				for _, h := range hostEntries(spec) {
 					args = append(args, "--add-host", h[0]+":"+h[1])
 				}
@@ -985,12 +989,19 @@ func hostEntries(spec LaunchSpec) [][2]string {
 	return out
 }
 
+// needsHostEntries reports whether a sandbox reaches the proxy and gateway by
+// address rather than through the engine's DNS: gVisor and VM sandboxes cannot
+// use that DNS, and Rig turns it off on Podman's internal networks.
+func (r *Runner) needsHostEntries(spec LaunchSpec) bool {
+	return spec.Isolation.Level != config.IsolationContainer || r.name == "podman"
+}
+
 // refreshHosts rewrites the proxy and gateway entries in a reused gVisor or
 // VM sandbox's hosts file. The gateway is started anew for each session and
 // its address can change; entries given at creation would go stale.
 func (r *Runner) refreshHosts(ctx context.Context, spec LaunchSpec, name string) {
 	entries := hostEntries(spec)
-	if spec.Isolation.Level == config.IsolationContainer || len(entries) == 0 || r.kind == "apple" {
+	if !r.needsHostEntries(spec) || len(entries) == 0 || r.kind == "apple" {
 		return
 	}
 	script := `grep -vE "[[:space:]](` + ProxyAlias + `|` + GatewayHost + `)$" /etc/hosts > /tmp/.rig-hosts; ` +
