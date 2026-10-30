@@ -467,10 +467,14 @@ vulnerability.
 ## Development
 
 ```bash
-make build        # bin/rig
-make check        # go vet and go test
+make build                            # bin/rig
+make check                            # go vet and go test
 go test -race ./...
+scripts/integration-test.sh bin/rig   # end-to-end checks against your container engine
 ```
+
+The integration tests build real sandboxes and check from inside them what each level promises. CI runs them on
+Docker with gVisor installed; set `RIG_IT_SKIP=gvisor` (or `internet`, `claude`) for what your machine lacks.
 
 `rig-helper` (the egress proxy, gateway and MCP guard) is built from this
 repository inside the image build and uses only Go's standard library; a test
