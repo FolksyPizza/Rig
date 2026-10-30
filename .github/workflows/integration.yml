@@ -31,16 +31,16 @@ jobs:
           cache: true
 
       - name: Install gVisor
+        env:
+          # A pinned release, checked against its published SHA-512.
+          GVISOR_RELEASE: "20261026.0"
+          GVISOR_SHA512: 26e4a327565f5da0f73261a6387e2c20f4695a232e330095a3111b70efd604fdf09d734e8cc8f714dbb5c5607ce8c87ea80b26df549d83a146f2efd5a1af448a
         run: |
-          arch="$(uname -m)"
-          url="https://storage.googleapis.com/gvisor/releases/release/latest/${arch}"
           cd "$RUNNER_TEMP"
-          for f in runsc runsc.sha512 containerd-shim-runsc-v1 containerd-shim-runsc-v1.sha512; do
-            curl -fsSL --retry 3 -o "$f" "$url/$f"
-          done
-          sha512sum -c runsc.sha512 containerd-shim-runsc-v1.sha512
-          chmod a+rx runsc containerd-shim-runsc-v1
-          sudo mv runsc containerd-shim-runsc-v1 /usr/local/bin/
+          curl -fsSL --retry 3 -o gvisor.tar.bz2 \
+            "https://storage.googleapis.com/gvisor/releases/release/${GVISOR_RELEASE}/x86_64/gvisor.tar.bz2"
+          echo "${GVISOR_SHA512}  gvisor.tar.bz2" | sha512sum -c -
+          sudo tar -xjf gvisor.tar.bz2 -C /usr/local/bin
           sudo /usr/local/bin/runsc install
           sudo systemctl restart docker
           docker info --format 'runtimes: {{range $name, $_ := .Runtimes}}{{$name}} {{end}}'
