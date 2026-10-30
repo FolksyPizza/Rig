@@ -630,7 +630,7 @@ func (r *Runner) buildCreateArgs(spec LaunchSpec, o createOpts) []string {
 			// image the first time.
 			args = append(args, "-v", "rig-"+profile.Name+"-home:"+sandboxHome)
 		case eff.NoExecHome:
-			args = append(args, "--tmpfs", fmt.Sprintf("%s:rw,nosuid,nodev,noexec,size=1g,uid=%d,gid=%d,mode=0755", sandboxHome, sandboxUID, sandboxUID))
+			args = append(args, "--tmpfs", sandboxHome+":rw,nosuid,nodev,noexec,size=1g,mode=0755,"+sandboxOwnedTmpfs(r.name))
 			if !hasWorkspace {
 				args = append(args, "-v", sandboxHome+"/workspace")
 			}
@@ -1023,4 +1023,14 @@ func (r *Runner) ContainerIP(ctx context.Context, name, network string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(out))
+}
+
+// sandboxOwnedTmpfs is the tmpfs option that makes the mount belong to the
+// sandbox user. Podman does not accept Docker's uid= and gid=; its U option
+// gives the mount to the container's user, which is the sandbox user.
+func sandboxOwnedTmpfs(engine string) string {
+	if engine == "podman" {
+		return "U"
+	}
+	return fmt.Sprintf("uid=%d,gid=%d", sandboxUID, sandboxUID)
 }

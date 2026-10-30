@@ -843,7 +843,7 @@ func TestNames(t *testing.T) {
 // The gateway must not run through the sandbox entrypoint, which unsets the
 // RIG_MCP_* variables that carry its MCP servers' secrets.
 func TestGatewayBypassesTheSandboxEntrypoint(t *testing.T) {
-	args := gatewayRunArgs("work", "rig-gw-work", "/tmp/env", "/tmp/gw", GatewayOptions{Image: "rig/work:latest", Network: "rig-net-work", Runtime: "runsc"})
+	args := gatewayRunArgs("docker", "work", "rig-gw-work", "/tmp/env", "/tmp/gw", GatewayOptions{Image: "rig/work:latest", Network: "rig-net-work", Runtime: "runsc"})
 	joined := strings.Join(args, " ")
 	if !argsContainPair(args, "--entrypoint", "/usr/local/bin/rig-helper") {
 		t.Fatalf("gateway must start rig-helper directly: %s", joined)
@@ -891,8 +891,11 @@ func TestPodmanSandboxesAvoidEngineDNSAndExtraTmpfs(t *testing.T) {
 	if args := (&Runner{name: "docker"}).buildCreateArgs(s, createOpts{name: "rig-demo"}); argsContain(args, "--read-only-tmpfs=false") || argsContain(args, "--add-host") {
 		t.Errorf("Docker containers use the engine's DNS and plain --read-only: %v", args)
 	}
-	gw := gatewayRunArgs("demo", "rig-gw-demo", "/e", "/c", GatewayOptions{Image: "rig/demo", Network: "rig-net-demo", ProxyIP: "10.89.0.2"})
+	gw := gatewayRunArgs("podman", "demo", "rig-gw-demo", "/e", "/c", GatewayOptions{Image: "rig/demo", Network: "rig-net-demo", ProxyIP: "10.89.0.2"})
 	if !argsContainPair(gw, "--add-host", ProxyAlias+":10.89.0.2") {
 		t.Error("the gateway reaches the proxy by address")
+	}
+	if !strings.Contains(strings.Join(gw, " "), "mode=0755,U") || strings.Contains(strings.Join(gw, " "), "uid=") {
+		t.Errorf("Podman takes U, not uid=, to give a tmpfs to the sandbox user: %v", gw)
 	}
 }

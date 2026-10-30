@@ -181,7 +181,7 @@ func (r *Runner) StartGateway(ctx context.Context, p *config.Profile, opts Gatew
 	}
 	defer cleanup()
 
-	args := gatewayRunArgs(p.Name, name, envFile, dir, opts)
+	args := gatewayRunArgs(r.name, p.Name, name, envFile, dir, opts)
 
 	cmd := exec.Command(r.bin, args...)
 	stdin, err := cmd.StdinPipe()
@@ -314,7 +314,7 @@ func writeEnvMap(env map[string]string) (string, func(), error) {
 // directly rather than through the sandbox entrypoint, which moves RIG_MCP_*
 // variables out of the environment: the gateway reads its MCP servers'
 // secrets from exactly those variables.
-func gatewayRunArgs(profileName, name, envFile, configDir string, opts GatewayOptions) []string {
+func gatewayRunArgs(engine, profileName, name, envFile, configDir string, opts GatewayOptions) []string {
 	args := []string{
 		"run", "-i", "--rm",
 		"--name", name,
@@ -325,7 +325,7 @@ func gatewayRunArgs(profileName, name, envFile, configDir string, opts GatewayOp
 		"--label", LabelRole + "=gateway",
 		"--read-only",
 		"--tmpfs", "/tmp:rw,nosuid,nodev,size=256m,mode=1777",
-		"--tmpfs", fmt.Sprintf("%s:rw,nosuid,nodev,size=512m,uid=%d,gid=%d,mode=0755", sandboxHome, sandboxUID, sandboxUID),
+		"--tmpfs", sandboxHome + ":rw,nosuid,nodev,size=512m,mode=0755," + sandboxOwnedTmpfs(engine),
 		"--cap-drop", "ALL",
 		"--security-opt", "no-new-privileges",
 		"--pids-limit", "256",
