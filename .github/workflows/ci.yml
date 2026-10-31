@@ -60,5 +60,7 @@ jobs:
           go-version: '1.25'
           cache: true
 
+      # Pinned: newer govulncheck releases need a newer Go than Rig builds
+      # with, and the scan must use the toolchain Rig is built with.
       - name: Known vulnerabilities in dependencies and the standard library
-        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
