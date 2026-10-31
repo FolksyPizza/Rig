@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -16,6 +17,7 @@ import (
 	"github.com/FolksyPizza/rig/internal/agents"
 	"github.com/FolksyPizza/rig/internal/config"
 	"github.com/FolksyPizza/rig/internal/container"
+	"github.com/FolksyPizza/rig/internal/provider"
 )
 
 // agentConfigs builds agent entries, passing through the API keys each agent
@@ -194,8 +196,10 @@ example.com and all of its subdomains.
 
   rig allow work docs.python.org
   rig allow work --remove docs.python.org
+  rig blocked work                 pick from the sites Rig blocked recently
 
-Takes effect the next time the sandbox starts ('rig run').`,
+A running sandbox gets the change immediately; otherwise it applies the next
+time the sandbox starts.`,
 		Args: cobra.MinimumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			store, p, err := loadProfile(args[0])
@@ -210,11 +214,32 @@ Takes effect the next time the sandbox starts ('rig run').`,
 				fmt.Fprintf(os.Stderr, "  Note: network mode is %s; the allowlist applies only in allowlist mode.\n", p.Network.Mode)
 			}
 			fmt.Printf("  %s now allows %d domains in total (see 'rig check %s').\n", p.Name, len(p.Resolve().Allowed), p.Name)
+			reloadAllowlist(p)
 			return nil
 		},
 	}
 	cmd.Flags().BoolVar(&remove, "remove", false, "remove the domains instead")
 	return cmd
+}
+
+// reloadAllowlist applies a saved allowlist to the sandbox's running egress
+// proxy, so the agent can retry at once.
+func reloadAllowlist(p *config.Profile) {
+	eff := p.Resolve()
+	if eff.NetworkMode != "allowlist" {
+		return
+	}
+	provider.PreferIsolationCapable(needsIsolationEngine(eff))
+	nm, err := container.NewNetworkManager()
+	if err != nil {
+		return
+	}
+	switch live, err := nm.Reload(context.Background(), p, eff); {
+	case err != nil:
+		fmt.Fprintf(os.Stderr, "  Note: could not update the running sandbox (%v); the change applies when it next starts.\n", err)
+	case live:
+		fmt.Println("  Applied to the running sandbox right away.")
+	}
 }
 
 func addCmd() *cobra.Command {

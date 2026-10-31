@@ -46,7 +46,7 @@ expect_output() {
 }
 
 cleanup() {
-	for name in std tight safe mcp gwmcp relay cc; do "$rig" rm "$name" --all --yes >/dev/null 2>&1 || true; done
+	for name in std tight safe bg mcp gwmcp relay cc; do "$rig" rm "$name" --all --yes >/dev/null 2>&1 || true; done
 	[ -n "${web_pid:-}" ] && kill "$web_pid" 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -103,6 +103,31 @@ else
 	expect 3 "lockdown stops at the first blocked connection" "$rig" run safe -- sh -c 'curl -s -o /dev/null --max-time 10 https://example.org; sleep 60'
 	expect 3 "lockdown stops a program from outside the image" "$rig" run safe -- sh -c 'cp /bin/sleep ./probe && ./probe 60'
 fi
+
+echo "== background sandbox"
+"$rig" new bg --agent testagent >/dev/null
+expect 0 "a sandbox starts in the background" "$rig" run bg -d
+expect_output "rig ps shows it monitored in the background" 'rig-bg .*yes \(background' "$rig" ps
+expect 56 "a site off the allowlist is refused" "$rig" exec bg -- curl -sS -o /dev/null --max-time 30 https://example.org
+expect_output "rig blocked lists the refused site" 'example\.org' "$rig" blocked bg
+expect_output "rig allow applies to the running sandbox at once" 'running sandbox right away' "$rig" allow bg example.org
+if skipping internet; then
+	echo "skip  the newly allowed site is reachable (no internet here)"
+else
+	expect 0 "the newly allowed site is reachable without a restart" "$rig" exec bg -- curl -fsS -o /dev/null --max-time 30 https://example.org
+fi
+expect 3 "the background monitor stops it on an exfiltration attempt" "$rig" exec bg -- sh -c 'curl -s -o /dev/null --max-time 10 https://pastebin.com; sleep 60'
+expect_output "the sandbox is stopped" 'rig-bg .*(Exited|exited)' "$rig" ps
+expect 0 "it starts again in the background" "$rig" run bg -d
+expect 0 "rig stop ends it" "$rig" stop bg
+sleep 3
+if pgrep -f "_supervise bg" >/dev/null; then fail "the background monitor exits with the sandbox"; else pass "the background monitor exits with the sandbox"; fi
+
+echo "== settings"
+expect_output "rig set shows the settings" 'permissions +ask' "$rig" set bg
+expect 0 "rig set changes compute and permissions" "$rig" set bg cpu=1.5 memory=1g permissions=full
+expect_output "the agent's permission mode is saved" 'agent_permissions: full' "$rig" show bg
+expect 1 "lockdown refuses full agent permissions" "$rig" set bg level=lockdown permissions=full
 
 echo "== MCP guard"
 cat >"$work/mcp/fake_mcp.py" <<'EOF'

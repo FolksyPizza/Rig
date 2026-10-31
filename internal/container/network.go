@@ -344,6 +344,31 @@ func (nm *NetworkManager) Teardown(ctx context.Context, profileName string) {
 	_ = exec.CommandContext(ctx, nm.bin, "network", "rm", nm.EgressNetworkName(profileName)).Run()
 }
 
+// Reload applies a changed allowlist to the profile's running proxy, which
+// re-reads its configuration on SIGHUP. It reports whether a proxy was
+// running; if not, the change applies when the sandbox next starts.
+func (nm *NetworkManager) Reload(ctx context.Context, profile *config.Profile, eff config.Effective) (bool, error) {
+	proxyName := nm.ProxyName(profile.Name)
+	if eff.NetworkMode != "allowlist" || !nm.containerRunning(ctx, proxyName) {
+		return false, nil
+	}
+	token := ""
+	if eff.NeedsGateway {
+		t, err := gatewayToken(profile.Name)
+		if err != nil {
+			return false, err
+		}
+		token = t
+	}
+	if _, err := nm.writeProxyConfig(profile.Name, eff, token); err != nil {
+		return false, err
+	}
+	if out, err := exec.CommandContext(ctx, nm.bin, "kill", "--signal", "HUP", proxyName).CombinedOutput(); err != nil {
+		return false, fmt.Errorf("reload egress proxy: %s", strings.TrimSpace(string(out)))
+	}
+	return true, nil
+}
+
 // StopServices removes the proxy and the gateway but keeps the networks, which
 // stopped sandboxes stay attached to and need when they start again.
 func (nm *NetworkManager) StopServices(ctx context.Context, profileName string) {

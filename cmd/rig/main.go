@@ -71,7 +71,7 @@ func main() {
 	}
 	add("start", newCmd(), runCmd(), templatesCmd(), agentsCmd(), levelsCmd())
 	add("security", checkCmd(), doctorCmd(), monitorCmd(), auditCmd())
-	add("config", setCmd(), editCmd(), allowCmd(), addCmd(), showCmd(), presetsCmd(), exportCmd(), importCmd(), listCmd())
+	add("config", setCmd(), editCmd(), allowCmd(), blockedCmd(), addCmd(), showCmd(), presetsCmd(), exportCmd(), importCmd(), listCmd())
 	add("manage", psCmd(), shellCmd(), execCmd(), stopCmd(), rmCmd(), buildCmd(), logsCmd(), cpCmd(),
 		statsCmd(), topCmd(), diffCmd(), pauseCmd(), unpauseCmd(), commitCmd(), renameCmd())
 	// Older names, kept so scripts keep working.
