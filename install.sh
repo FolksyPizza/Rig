@@ -5,7 +5,7 @@
 #
 # It downloads the latest release for this computer, checks it against the
 # release's SHA256SUMS and installs it in ~/.local/bin. When no release build
-# is available it builds Rig from source instead (needs git and Go 1.25+).
+# is available it builds Rig from source instead (needs git and Go 1.26+).
 #
 # Settings (environment variables):
 #   RIG_VERSION=v0.3.0        install that release instead of the latest
@@ -67,7 +67,7 @@ from_release() {
 
 from_source() {
   command -v git >/dev/null 2>&1 || fail "no release build is available and git is not installed to build from source."
-  command -v go >/dev/null 2>&1 || fail "no release build is available; install Go 1.25 or later (https://go.dev/dl/) to build from source."
+  command -v go >/dev/null 2>&1 || fail "no release build is available; install Go 1.26 or later (https://go.dev/dl/) to build from source."
   ref=main
   [ "$version" = latest ] || ref="$version"
   say "Building Rig from source ($ref)..."

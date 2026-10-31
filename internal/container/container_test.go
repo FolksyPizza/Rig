@@ -185,7 +185,7 @@ func TestHelperStageOnlyWhenNeeded(t *testing.T) {
 	p := testProfile()
 	p.MCP.Servers = []config.MCPServer{{Name: "fs", Command: []string{"mcp-fs"}}}
 	bc := mustContext(t, p)
-	if !strings.Contains(bc.Dockerfile, "FROM golang:1.25-alpine AS rig-helper") || !strings.Contains(bc.Dockerfile, "COPY --from=rig-helper") {
+	if !strings.Contains(bc.Dockerfile, "FROM golang:1.26-alpine AS rig-helper") || !strings.Contains(bc.Dockerfile, "COPY --from=rig-helper") {
 		t.Errorf("in-sandbox MCP servers need rig-helper:\n%s", bc.Dockerfile)
 	}
 	if bc.Files["rig-helper-src/cmd/rig-helper/main.go"] == nil || bc.Files["rig-helper-src/go.mod"] == nil {

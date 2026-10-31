@@ -22,7 +22,7 @@ const (
 	// defaultBaseImage is pinned to an LTS tag so images are reproducible.
 	defaultBaseImage = "ubuntu:24.04"
 	// defaultGoImage builds rig-helper inside the image build.
-	defaultGoImage = "golang:1.25-alpine"
+	defaultGoImage = "golang:1.26-alpine"
 
 	sandboxHome = "/home/sandbox"
 	// sandboxUID matches the first regular user on most Linux hosts, so files
@@ -437,7 +437,7 @@ func contextHash(dockerfile string, files map[string][]byte) string {
 // addHelperSource copies rig-helper's embedded source into the context under
 // prefix, with a minimal go.mod. Tests are left out.
 func addHelperSource(files map[string][]byte, prefix string) error {
-	files[prefix+"go.mod"] = []byte("module " + rig.ModulePath + "\n\ngo 1.25\n")
+	files[prefix+"go.mod"] = []byte("module " + rig.ModulePath + "\n\ngo 1.26\n")
 	return fs.WalkDir(rig.HelperSource, ".", func(path string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() || strings.HasSuffix(path, "_test.go") {
 			return err

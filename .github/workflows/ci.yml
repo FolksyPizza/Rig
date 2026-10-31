@@ -18,7 +18,7 @@ jobs:
 
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
-          go-version: '1.25'
+          go-version: '1.26'
           cache: true
 
       - name: Verify formatting
@@ -57,10 +57,10 @@ jobs:
 
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
-          go-version: '1.25'
+          go-version: '1.26'
           cache: true
 
-      # Pinned: newer govulncheck releases need a newer Go than Rig builds
-      # with, and the scan must use the toolchain Rig is built with.
+      # Pinned, so a new govulncheck release (which may need a newer Go) does
+      # not break the job; the scan uses the toolchain Rig is built with.
       - name: Known vulnerabilities in dependencies and the standard library
-        run: go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...

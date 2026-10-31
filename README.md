@@ -46,11 +46,11 @@ rig doctor             # checks your engine and isolation runtimes
 
 The script downloads the latest release for your computer, checks it against
 the release's `SHA256SUMS` and installs it in `~/.local/bin`. If no release
-build is available it builds Rig from source (needs git and Go 1.25+).
+build is available it builds Rig from source (needs git and Go 1.26+).
 `RIG_VERSION=v0.3.0` picks a release, `RIG_INSTALL_DIR=/usr/local/bin` another
 location. Read the script first if you prefer: it is short.
 
-**From a clone** (needs Go 1.25+):
+**From a clone** (needs Go 1.26+):
 
 ```bash
 git clone https://github.com/FolksyPizza/Rig.git
@@ -505,7 +505,7 @@ metadata:
 | `RIG_ENGINE` | force `docker`, `podman` or `apple` |
 | `RIG_BASE_IMAGE` | base image instead of `ubuntu:24.04` (a mirror, or a digest pin) |
 | `RIG_NODE_IMAGE` | image Node.js is copied from, instead of `node:<major>-bookworm-slim` |
-| `RIG_GO_IMAGE` | image that builds Rig's helper, instead of `golang:1.25-alpine` |
+| `RIG_GO_IMAGE` | image that builds Rig's helper, instead of `golang:1.26-alpine` |
 | `RIG_AGENTS_DIR` | where custom agent definitions live |
 
 ## Limits
