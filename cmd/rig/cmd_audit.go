@@ -146,9 +146,9 @@ func printRecord(r monitor.Record) {
 	}
 	sev := ""
 	if r.Severity != "" && r.Severity != "info" {
-		sev = " " + paint("2", "["+r.Severity+"]")
+		sev = " " + paint("2", "["+safeText(r.Severity)+"]")
 	}
-	fmt.Printf("%s  %s  %-16s %s%s\n", safeText(ts), action, safeText(r.Kind), safeText(r.Detail), safeText(sev))
+	fmt.Printf("%s  %s  %-16s %s%s\n", safeText(ts), action, safeText(r.Kind), safeText(r.Detail), sev)
 }
 
 // followAudit prints records appended to the log from now on, following
@@ -274,7 +274,7 @@ Press Ctrl-C to stop watching.`,
 				if eff.NetworkMode == "allowlist" {
 					setup = &container.NetworkSetup{Network: "rig-net-" + profile.Name}
 				}
-				results := startMonitor(ctx, profile, eff, r, provider.Detect(), target, setup, nil, true)
+				results := startMonitor(ctx, profile, eff, r, provider.Detect(), target, setup, nil, true, nil)
 				go func() {
 					if cause := <-results; cause != nil {
 						fmt.Fprintf(os.Stderr, "\n  %s %s\n", paint("1;31", "Rig stopped the sandbox:"), safeText(cause.Detail))

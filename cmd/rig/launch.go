@@ -12,6 +12,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/mattn/go-isatty"
+
 	"github.com/FolksyPizza/rig/internal/aimonitor"
 	"github.com/FolksyPizza/rig/internal/config"
 	"github.com/FolksyPizza/rig/internal/container"
@@ -162,8 +164,11 @@ func launch(profile *config.Profile, opts container.RunOptions) error {
 	}
 
 	monCtx, monCancel := context.WithCancel(ctx)
-	results := startMonitor(monCtx, profile, eff, runner, prov, prepared.Name, setup, gwLines, false)
+	blocked := &blockedHosts{}
+	results := startMonitor(monCtx, profile, eff, runner, prov, prepared.Name, setup, gwLines, false, blocked)
+	pushTitle()
 	runErr := runner.Attach(ctx, prepared, opts)
+	popTitle()
 	if eff.MonitorMode != "off" {
 		// Let the monitor read events still in flight (the proxy's log is
 		// read through the engine) before it stops.
@@ -189,8 +194,14 @@ func launch(profile *config.Profile, opts container.RunOptions) error {
 	gw.Stop()
 	teardownIfIdle(runner, nm, profile.Name)
 
+	blocked.summary(profile.Name)
 	if cause != nil {
-		fmt.Fprintf(os.Stderr, "\n  %s %s\n  Details: rig audit %s\n", paint("1;31", "Rig stopped the sandbox:"), safeText(cause.Detail), profile.Name)
+		fmt.Fprintf(os.Stderr, "\n  %s %s\n  Details: rig audit %s --flagged\n", paint("1;31", "Rig stopped the sandbox:"), safeText(cause.Detail), profile.Name)
+		if len(opts.Command) == 0 && opts.Container == "" && interactiveTerminal() {
+			if again := afterStop(profile, cause); again {
+				return launch(profile, container.RunOptions{})
+			}
+		}
 		return exitError{code: 3}
 	}
 	// Pass the shell's or command's exit status through without an error
@@ -274,7 +285,7 @@ func banner(eff config.Effective, iso container.Isolation) string {
 // background. The channel receives the observation that stopped the sandbox,
 // or nil.
 func startMonitor(ctx context.Context, profile *config.Profile, eff config.Effective, runner *container.Runner, prov provider.Provider,
-	name string, setup *container.NetworkSetup, gwLines <-chan []byte, verbose bool) <-chan *watchdog.Observation {
+	name string, setup *container.NetworkSetup, gwLines <-chan []byte, verbose bool, blocked *blockedHosts) <-chan *watchdog.Observation {
 
 	results := make(chan *watchdog.Observation, 1)
 	if eff.MonitorMode == "off" {
@@ -366,7 +377,7 @@ func startMonitor(ctx context.Context, profile *config.Profile, eff config.Effec
 		Sources:   sources,
 		Enforcer:  monitor.ProviderEnforcer{Provider: prov, Container: name},
 		Audit:     audit,
-		Notify:    notifier(verbose),
+		Notify:    notifier(verbose, profile.Name, blocked),
 	}
 	if ai != nil {
 		p.AI = ai
@@ -420,16 +431,24 @@ func hasSandboxMCP(p *config.Profile) bool {
 	return false
 }
 
-// notifier prints alerts. In an interactive session the terminal may be in
-// raw mode, so lines are framed with explicit carriage returns. 'rig monitor'
-// (verbose) already prints every event, so it gets none.
-func notifier(verbose bool) func(watchdog.Event) {
+// notifier prints alerts in the terminal. In an interactive session the
+// terminal may be in raw mode, so lines are framed with explicit carriage
+// returns, and the shell or agent is asked to redraw afterwards so its prompt
+// comes back instead of leaving the session looking frozen. 'rig monitor'
+// (verbose) already prints every event, so it gets none. Blocked sites are
+// also collected in blocked, for the summary printed when the session ends.
+func notifier(verbose bool, profileName string, blocked *blockedHosts) func(watchdog.Event) {
 	if verbose {
 		return nil
 	}
 	var mu sync.Mutex
 	last := map[string]time.Time{}
+	interactive := stderrTTY && isatty.IsTerminal(os.Stdin.Fd())
 	return func(e watchdog.Event) {
+		host, denied := deniedHost(e.Observation)
+		if denied {
+			blocked.add(host)
+		}
 		key := e.Observation.Kind + "\x00" + e.Observation.Detail
 		mu.Lock()
 		if t, ok := last[key]; ok && time.Since(t) < 10*time.Second {
@@ -440,11 +459,84 @@ func notifier(verbose bool) func(watchdog.Event) {
 		mu.Unlock()
 
 		label := paint("1;33", "[rig] flagged:")
-		if e.Action == watchdog.ActionKill {
+		detail := safeText(e.Observation.Detail)
+		switch {
+		case e.Action == watchdog.ActionKill:
 			label = paint("1;31", "[rig] stopping the sandbox:")
+		case denied:
+			label = paint("1;33", "[rig] blocked")
+			detail = safeText(host) + paint("2", " (not on the allowlist; to allow it: rig allow "+profileName+" "+safeText(host)+")")
 		}
-		fmt.Fprintf(os.Stderr, "\r\n%s %s\r\n", label, safeText(e.Observation.Detail))
+		fmt.Fprintf(os.Stderr, "\r\n%s %s\r\n", label, detail)
+		if interactive {
+			setTitle("rig " + profileName + ": " + safeText(e.Observation.Detail))
+			if e.Action != watchdog.ActionKill {
+				go func() {
+					mu.Lock()
+					defer mu.Unlock()
+					redrawTerminal()
+				}()
+			}
+		}
 	}
+}
+
+// deniedHost returns the host of an ordinary allowlist refusal: the kind of
+// block you may want to lift with 'rig allow'.
+func deniedHost(o watchdog.Observation) (string, bool) {
+	if o.Kind != "egress_denied" || len(o.Data) == 0 {
+		return "", false
+	}
+	var ev struct {
+		Host string `json:"host"`
+	}
+	if json.Unmarshal(o.Data, &ev) != nil || ev.Host == "" {
+		return "", false
+	}
+	return strings.ToLower(ev.Host), true
+}
+
+// blockedHosts counts the sites refused during one session.
+type blockedHosts struct {
+	mu    sync.Mutex
+	count map[string]int
+	order []string
+}
+
+func (b *blockedHosts) add(host string) {
+	if b == nil {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.count == nil {
+		b.count = map[string]int{}
+	}
+	if b.count[host] == 0 {
+		b.order = append(b.order, host)
+	}
+	b.count[host]++
+}
+
+// summary prints what was blocked and how to allow it.
+func (b *blockedHosts) summary(profileName string) {
+	if b == nil {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if len(b.order) == 0 {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "\n  %s\n", paint("1", "Blocked during this session (not on the allowlist):"))
+	for _, h := range b.order {
+		times := ""
+		if n := b.count[h]; n > 1 {
+			times = fmt.Sprintf(" (%d times)", n)
+		}
+		fmt.Fprintf(os.Stderr, "    %s%s\n", safeText(h), times)
+	}
+	fmt.Fprintf(os.Stderr, "  To allow one: rig allow %s %s   (or 'rig blocked %s' to pick)\n", profileName, safeText(b.order[0]), profileName)
 }
 
 // lazyIP looks up a container's address on a network once it has one.
