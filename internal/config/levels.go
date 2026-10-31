@@ -97,10 +97,11 @@ type Effective struct {
 	ExecOnlyFromImage bool
 	AIEnforce         bool
 
-	HarnessLockdown  bool // agent-level policies (deny web tools, no bypass mode)
-	NpmIgnoreScripts bool // no npm install scripts at run time
-	PipOnlyBinary    bool // no source builds (setup.py) at run time
-	QuietAgents      bool // telemetry, error reporting and auto-update off
+	HarnessLockdown  bool   // agent-level policies (deny web tools, no bypass mode)
+	AgentPermissions string // ask | edit | full
+	NpmIgnoreScripts bool   // no npm install scripts at run time
+	PipOnlyBinary    bool   // no source builds (setup.py) at run time
+	QuietAgents      bool   // telemetry, error reporting and auto-update off
 
 	ProtectPaths []string // auto-protected paths inside writable mounts
 	Ephemeral    bool
@@ -169,6 +170,10 @@ func (p *Profile) Resolve() Effective {
 	e.AIEnforce = p.Monitor.AI.Enforce || level == LevelLockdown
 
 	e.HarnessLockdown = level == LevelLockdown
+	e.AgentPermissions = p.Security.AgentPermissions
+	if e.AgentPermissions == "" || (level == LevelLockdown && e.AgentPermissions == PermissionsFull) {
+		e.AgentPermissions = PermissionsAsk
+	}
 	e.NpmIgnoreScripts = r >= LevelRank(LevelStrict)
 	e.PipOnlyBinary = level == LevelLockdown
 	e.QuietAgents = r >= LevelRank(LevelStandard)

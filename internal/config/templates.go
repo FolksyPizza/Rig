@@ -11,10 +11,6 @@ func boolPtr(b bool) *bool { return &b }
 
 var workspace = []VolumeMount{{Name: "workspace", Target: "/home/sandbox/workspace"}}
 
-func claudeAgent() AgentConfig {
-	return AgentConfig{ID: "claude-code", Env: map[string]string{"ANTHROPIC_API_KEY": "${ANTHROPIC_API_KEY}"}}
-}
-
 func base(level string) Profile {
 	return Profile{
 		Version:     1,
@@ -28,61 +24,29 @@ func base(level string) Profile {
 	}
 }
 
-// BuiltinTemplates returns every template. The first is the default for
-// `rig new` when no template is named.
+// BuiltinTemplates returns every template. Most leave the agent open: 'rig
+// new' fills it in from --agent, a question, or the API keys it finds. The
+// first is the default.
 func BuiltinTemplates() []Template {
 	standard := base(LevelStandard)
-	standard.Agents = []AgentConfig{claudeAgent()}
 	standard.Network.Presets = []string{"github", "npm", "pypi"}
 
 	strict := base(LevelStrict)
-	strict.Agents = []AgentConfig{claudeAgent()}
 	strict.Network.Presets = []string{"github"}
 	strict.Persistence = "ephemeral"
 
 	lockdown := base(LevelLockdown)
-	lockdown.Agents = []AgentConfig{claudeAgent()}
 	lockdown.Tools = []string{"git", "curl", "jq", "ripgrep", "fd-find"}
 	lockdown.Persistence = "ephemeral"
 	lockdown.Security.Isolation = IsolationAuto
 
 	dev := base(LevelOpen)
-	dev.Agents = []AgentConfig{claudeAgent()}
 	dev.Tools = append(dev.Tools, "neovim", "tmux", "build-essential", "unzip")
 	dev.Network = NetworkConfig{Mode: "unrestricted"}
 	dev.Security.Sudo = true
+	dev.Security.AgentPermissions = PermissionsFull
 	dev.Resources = ResourcesConfig{CPU: 4.0, Memory: 8192, PIDLimit: 1024}
 	dev.Storage.Size = "20g"
-
-	codex := base(LevelStandard)
-	codex.Agents = []AgentConfig{{ID: "codex", Env: map[string]string{"OPENAI_API_KEY": "${OPENAI_API_KEY}"}}}
-	codex.Network.Presets = []string{"github", "npm", "pypi"}
-
-	gemini := base(LevelStandard)
-	gemini.Agents = []AgentConfig{{ID: "gemini-cli", Env: map[string]string{"GEMINI_API_KEY": "${GEMINI_API_KEY}"}}}
-	gemini.Network.Presets = []string{"github", "npm", "pypi"}
-
-	pi := base(LevelStandard)
-	pi.Agents = []AgentConfig{{ID: "pi", Env: map[string]string{"ANTHROPIC_API_KEY": "${ANTHROPIC_API_KEY}"}}}
-	pi.Network.Presets = []string{"github", "npm", "pypi"}
-
-	opencode := base(LevelStandard)
-	opencode.Agents = []AgentConfig{{ID: "opencode", Env: map[string]string{"ANTHROPIC_API_KEY": "${ANTHROPIC_API_KEY}"}}}
-	opencode.Network.Presets = []string{"github", "npm", "pypi"}
-
-	qwen := base(LevelStandard)
-	qwen.Agents = []AgentConfig{{ID: "qwen-code", Env: map[string]string{
-		"OPENAI_API_KEY":  "${DASHSCOPE_API_KEY}",
-		"OPENAI_BASE_URL": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
-	}}}
-	qwen.Network.Presets = []string{"github", "npm", "pypi"}
-
-	grove := base(LevelStandard)
-	grove.Agents = []AgentConfig{{ID: "grove", Env: map[string]string{
-		"OPENAI_API_KEY":    "${OPENAI_API_KEY}",
-		"ANTHROPIC_API_KEY": "${ANTHROPIC_API_KEY}",
-	}}}
-	grove.Network.Presets = []string{"github", "npm", "pypi"}
 
 	// An open-weight model on your own machine, with no internet at all: the
 	// agent can reach only Ollama, through the gateway.
@@ -99,7 +63,6 @@ func BuiltinTemplates() []Template {
 	// execute_blender_code runs arbitrary Python inside Blender on your
 	// machine, outside the sandbox, so it is blocked unless you allow it.
 	blender := base(LevelStandard)
-	blender.Agents = []AgentConfig{claudeAgent()}
 	blender.Network.Presets = []string{"github", "npm", "pypi"}
 	blender.MCP = MCPConfig{Servers: []MCPServer{{
 		Name:      "blender",
@@ -112,20 +75,18 @@ func BuiltinTemplates() []Template {
 
 	multi := base(LevelStandard)
 	multi.Agents = []AgentConfig{
-		claudeAgent(),
-		{ID: "gemini-cli", Env: map[string]string{"GEMINI_API_KEY": "${GEMINI_API_KEY}"}},
+		{ID: "claude-code", Env: map[string]string{"ANTHROPIC_API_KEY": "${ANTHROPIC_API_KEY}"}},
 		{ID: "codex", Env: map[string]string{"OPENAI_API_KEY": "${OPENAI_API_KEY}"}},
+		{ID: "gemini-cli", Env: map[string]string{"GEMINI_API_KEY": "${GEMINI_API_KEY}"}},
 	}
 	multi.Network.Presets = []string{"github", "npm", "pypi"}
 	multi.Resources = ResourcesConfig{CPU: 4.0, Memory: 16384, PIDLimit: 2048}
 	multi.Storage.Size = "30g"
 
 	airgapped := base(LevelStrict)
-	airgapped.Agents = []AgentConfig{{ID: "claude-code"}}
 	airgapped.Network = NetworkConfig{Mode: "none"}
 
 	minimal := base(LevelStandard)
-	minimal.Agents = []AgentConfig{claudeAgent()}
 	minimal.Tools = []string{"git", "curl", "jq"}
 	minimal.Resources = ResourcesConfig{CPU: 1.0, Memory: 2048, PIDLimit: 256}
 	minimal.Storage = StorageConfig{Size: "5g"}
@@ -136,40 +97,57 @@ func BuiltinTemplates() []Template {
 	research.Network = NetworkConfig{Mode: "unrestricted", BlockExfil: boolPtr(true)}
 
 	return []Template{
-		{"standard", "Claude Code with an egress allowlist (recommended starting point)", standard},
-		{"claude-strict", "Claude Code, strict: read-only image, HTTPS only, ephemeral", strict},
-		{"lockdown", "Claude Code, lockdown: model API only, gVisor/VM required, ephemeral", lockdown},
-		{"claude-dev", "Claude Code, open: unrestricted network and sudo (trusted work only)", dev},
-		{"codex", "OpenAI Codex with an egress allowlist", codex},
-		{"gemini", "Gemini CLI with an egress allowlist", gemini},
-		{"pi", "Pi coding agent with an egress allowlist", pi},
-		{"opencode", "OpenCode with an egress allowlist", opencode},
-		{"qwen-code", "Qwen Code against Alibaba DashScope", qwen},
-		{"grove", "Grove (Codex-based harness) with an egress allowlist", grove},
-		{"local-model", "Qwen Code on your local Ollama, no internet access at all", local},
-		{"blender", "Claude Code with Blender over MCP, code execution blocked", blender},
-		{"multi-agent", "Claude Code, Gemini CLI and Codex side by side", multi},
+		{"standard", "Egress allowlist, exfiltration sites blocked (recommended)", standard},
+		{"strict", "Read-only image, HTTPS only, no sudo, ephemeral", strict},
+		{"lockdown", "Model API only, gVisor or VM required, ephemeral", lockdown},
+		{"dev", "Open: unrestricted network, sudo, no approval prompts (trusted work only)", dev},
 		{"airgapped", "No network at all", airgapped},
-		{"minimal", "Small, ephemeral Claude Code sandbox", minimal},
+		{"minimal", "Small and ephemeral", minimal},
+		{"blender", "Blender over MCP, its code-execution tool blocked", blender},
+		{"local-model", "Qwen Code on your local Ollama, no internet at all", local},
+		{"multi-agent", "Claude Code, Codex and Gemini CLI side by side", multi},
 		{"hermes-research", "Hermes Agent with open web access for research (open level)", research},
 	}
 }
 
-// templateAliases keeps older template names working.
-var templateAliases = map[string]string{
-	"claude-secure": "claude-strict",
-	"codex-dev":     "codex",
+// templateAlias maps an older or agent-named template to a template and the
+// agents it implies.
+type templateAlias struct {
+	template string
+	agents   []string
 }
 
-// GetTemplate finds a template by name or alias.
+var templateAliases = map[string]templateAlias{
+	"claude-strict": {"strict", []string{"claude-code"}},
+	"claude-secure": {"strict", []string{"claude-code"}},
+	"claude-dev":    {"dev", []string{"claude-code"}},
+	"codex":         {"standard", []string{"codex"}},
+	"codex-dev":     {"standard", []string{"codex"}},
+	"gemini":        {"standard", []string{"gemini-cli"}},
+	"pi":            {"standard", []string{"pi"}},
+	"opencode":      {"standard", []string{"opencode"}},
+	"qwen-code":     {"standard", []string{"qwen-code"}},
+	"grove":         {"standard", []string{"grove"}},
+}
+
+// GetTemplate finds a template by name or alias. For an agent-named alias
+// (codex, gemini, claude-strict, ...) the returned template's profile names
+// that agent.
 func GetTemplate(name string) (Template, bool) {
+	var implied []string
 	if alias, ok := templateAliases[name]; ok {
-		name = alias
+		name, implied = alias.template, alias.agents
 	}
 	for _, t := range BuiltinTemplates() {
 		if t.Name == name {
+			for _, id := range implied {
+				t.Profile.Agents = append(t.Profile.Agents, AgentConfig{ID: id})
+			}
 			return t, true
 		}
 	}
 	return Template{}, false
 }
+
+// NeedsAgent reports whether the template leaves the agent to choose.
+func (t Template) NeedsAgent() bool { return len(t.Profile.Agents) == 0 }

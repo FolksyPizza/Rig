@@ -31,6 +31,9 @@ type customDef struct {
 	Env         []string `yaml:"env"`
 	MCPFormat   string   `yaml:"mcp_format"`
 	LocalModels bool     `yaml:"local_models"`
+	// Permissions are the flags for Rig's permission modes, e.g.
+	// {edit: [--auto-edit], full: [--yolo]}.
+	Permissions map[string][]string `yaml:"permissions"`
 }
 
 var (
@@ -161,6 +164,16 @@ func (d customDef) spec() (AgentSpec, error) {
 	if strings.ContainsAny(d.Command+d.Verify, "\n\r\x00") {
 		return AgentSpec{}, fmt.Errorf("command and verify must be single lines")
 	}
+	for mode, args := range d.Permissions {
+		if mode != "edit" && mode != "full" {
+			return AgentSpec{}, fmt.Errorf("permissions: unknown mode %q (want edit or full)", mode)
+		}
+		for _, a := range args {
+			if a == "" || strings.ContainsAny(a, "\n\r\x00") {
+				return AgentSpec{}, fmt.Errorf("permissions: flags must be single, non-empty lines")
+			}
+		}
+	}
 	name := d.Name
 	if name == "" {
 		name = d.ID
@@ -178,6 +191,7 @@ func (d customDef) spec() (AgentSpec, error) {
 		EnvHints:       d.Env,
 		MCPFormat:      d.MCPFormat,
 		LocalModels:    d.LocalModels,
+		PermissionArgs: d.Permissions,
 		Custom:         true,
 	}, nil
 }

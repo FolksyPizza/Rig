@@ -56,8 +56,30 @@ type AgentSpec struct {
 	// QuietEnv turns off telemetry, error reporting, auto-update and other
 	// traffic the agent does not need. Applied at standard level and above.
 	QuietEnv map[string]string
+	// PermissionArgs are the command-line flags that put the agent in each
+	// permission mode Rig offers: "edit" (file edits without asking) and
+	// "full" (no approval prompts). "ask" is the agent's own default. Rig
+	// installs a wrapper that adds them when the profile asks for a mode.
+	PermissionArgs map[string][]string
+	// PermissionNote explains how the agent handles permissions when Rig
+	// cannot change it (for example, an agent that never asks).
+	PermissionNote string
 	// Custom marks agents defined by the user in ~/.config/rig/agents.
 	Custom bool
+}
+
+// PermissionSupport describes what a permission mode means for this agent.
+func (a AgentSpec) PermissionSupport(mode string) string {
+	if mode == "" || mode == "ask" {
+		return "asks before acting (its default)"
+	}
+	if args, ok := a.PermissionArgs[mode]; ok {
+		return "runs with " + strings.Join(args, " ")
+	}
+	if a.PermissionNote != "" {
+		return a.PermissionNote
+	}
+	return "Rig cannot change its permissions; it keeps its own default"
 }
 
 // Steps returns the install steps for a version ("" for the default).
@@ -204,4 +226,24 @@ func (a AgentSpec) Describe() string {
 		parts = append(parts, "custom")
 	}
 	return strings.Join(parts, " · ")
+}
+
+// keyAgents maps an API key to the agent it most clearly belongs to, in the
+// order Rig offers them.
+var keyAgents = []struct{ env, agent string }{
+	{"ANTHROPIC_API_KEY", "claude-code"},
+	{"OPENAI_API_KEY", "codex"},
+	{"GEMINI_API_KEY", "gemini-cli"},
+	{"XAI_API_KEY", "grok-build"},
+}
+
+// FromEnv lists the agents whose API key is set, by getenv.
+func FromEnv(getenv func(string) string) []string {
+	var ids []string
+	for _, k := range keyAgents {
+		if getenv(k.env) != "" {
+			ids = append(ids, k.agent)
+		}
+	}
+	return ids
 }

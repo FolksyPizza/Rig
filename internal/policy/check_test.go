@@ -60,10 +60,10 @@ func TestBlenderExecuteCode(t *testing.T) {
 }
 
 func TestBroadWildcardsAndTokens(t *testing.T) {
-	p := config.DefaultProfile()
+	p := config.DefaultProfile("claude-code")
 	p.Name = "x"
 	p.Network.AllowedDomains = []string{"*.amazonaws.com", "pastebin.com"}
-	p.Agents[0].Env["GITHUB_TOKEN"] = "${GITHUB_TOKEN}"
+	p.Agents[0].Env = map[string]string{"GITHUB_TOKEN": "${GITHUB_TOKEN}"}
 	p.Mounts = []config.MountConfig{{Source: "/srv/code", Target: "/code"}}
 	fs := Check(&p)
 	for _, want := range []struct {

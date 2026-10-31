@@ -55,7 +55,19 @@ type SecurityConfig struct {
 	// Sudo gives the sandbox user passwordless sudo, with the minimum
 	// capabilities package installs need. Allowed only at open and standard.
 	Sudo bool `yaml:"sudo,omitempty"`
+	// AgentPermissions sets how much the agents may do inside the sandbox
+	// without asking you first: ask (each agent's own default), edit (file
+	// edits without asking) or full (no approval prompts; the sandbox is the
+	// boundary). Lockdown allows ask and edit only.
+	AgentPermissions string `yaml:"agent_permissions,omitempty"`
 }
+
+// Agent permission modes.
+const (
+	PermissionsAsk  = "ask"
+	PermissionsEdit = "edit"
+	PermissionsFull = "full"
+)
 
 // AgentConfig selects an agent and its environment.
 type AgentConfig struct {
@@ -382,6 +394,11 @@ func (p *Profile) validateSecurity() error {
 	default:
 		return fmt.Errorf("invalid isolation %q (want auto, container, gvisor or vm)", p.Security.Isolation)
 	}
+	switch p.Security.AgentPermissions {
+	case "", PermissionsAsk, PermissionsEdit, PermissionsFull:
+	default:
+		return fmt.Errorf("invalid agent_permissions %q (want ask, edit or full)", p.Security.AgentPermissions)
+	}
 	return nil
 }
 
@@ -702,6 +719,9 @@ func (p *Profile) validateLevelFloor() error {
 		}
 	}
 	if level == LevelLockdown {
+		if p.Security.AgentPermissions == PermissionsFull {
+			return fmt.Errorf("lockdown does not allow agent_permissions: full; agents keep asking before they act (use edit at most)")
+		}
 		if p.Security.Isolation == IsolationContainer {
 			return fmt.Errorf("lockdown requires gVisor or VM isolation; set security.isolation to auto, gvisor or vm")
 		}

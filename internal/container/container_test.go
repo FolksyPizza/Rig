@@ -899,3 +899,39 @@ func TestPodmanSandboxesAvoidEngineDNSAndExtraTmpfs(t *testing.T) {
 		t.Errorf("Podman takes U, not uid=, to give a tmpfs to the sandbox user: %v", gw)
 	}
 }
+
+func TestAgentPermissionsInstallWrappers(t *testing.T) {
+	p := testProfile()
+	p.Agents = []config.AgentConfig{{ID: "claude-code"}, {ID: "pi"}}
+	if bc := mustContext(t, p); bc.Files["rig/bin/claude"] != nil || strings.Contains(bc.Dockerfile, "/etc/rig/bin/*") {
+		t.Error("the default (ask) must not wrap any agent")
+	}
+
+	p.Security.AgentPermissions = config.PermissionsFull
+	bc := mustContext(t, p)
+	w := string(bc.Files["rig/bin/claude"])
+	if !strings.Contains(w, `exec "$real" '--permission-mode' 'bypassPermissions' "$@"`) {
+		t.Errorf("claude wrapper:\n%s", w)
+	}
+	if bc.Files["rig/bin/pi"] != nil {
+		t.Error("pi has no permission flags and must not be wrapped")
+	}
+	if !strings.Contains(bc.Dockerfile, "chmod 0755 /etc/rig/bin/*") || !strings.Contains(bc.Dockerfile, "ENV PATH=/etc/rig/bin:") {
+		t.Errorf("wrappers must be executable and first on PATH:\n%s", bc.Dockerfile)
+	}
+
+	p.Security.AgentPermissions = config.PermissionsEdit
+	if w := string(mustContext(t, p).Files["rig/bin/claude"]); !strings.Contains(w, "'acceptEdits'") {
+		t.Errorf("edit mode wrapper:\n%s", w)
+	}
+}
+
+func TestOpenCodePermissionsGoInItsConfig(t *testing.T) {
+	p := testProfile()
+	p.Agents = []config.AgentConfig{{ID: "opencode"}}
+	p.Security.AgentPermissions = config.PermissionsEdit
+	cfg := string(mustContext(t, p).Files["rig/home/.config/opencode/opencode.json"])
+	if !strings.Contains(cfg, `"bash": "ask"`) || !strings.Contains(cfg, `"edit": "allow"`) {
+		t.Errorf("opencode.json:\n%s", cfg)
+	}
+}

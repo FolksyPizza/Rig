@@ -488,6 +488,24 @@ func (r *Runner) ContainerStats(ctx context.Context, containerName string) (stri
 	return strings.TrimSpace(string(out)), nil
 }
 
+// UpdateResources changes a container's CPU, memory and process limits in
+// place, running or stopped.
+func (r *Runner) UpdateResources(ctx context.Context, name string, res config.ResourcesConfig) error {
+	if r.kind == "apple" {
+		return fmt.Errorf("Apple's container runtime cannot change limits in place")
+	}
+	out, err := exec.CommandContext(ctx, r.bin, "update",
+		fmt.Sprintf("--cpus=%.2f", res.CPU),
+		fmt.Sprintf("--memory=%dm", res.Memory),
+		fmt.Sprintf("--memory-swap=%dm", res.Memory),
+		fmt.Sprintf("--pids-limit=%d", res.PIDLimit),
+		name).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%s", strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
 func (r *Runner) Rename(ctx context.Context, oldName, newName string) error {
 	cmd := exec.CommandContext(ctx, r.bin, "rename", oldName, newName)
 	cmd.Stdout = os.Stdout

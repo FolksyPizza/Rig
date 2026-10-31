@@ -93,9 +93,46 @@ func TestBuiltinTemplatesAreValid(t *testing.T) {
 	for _, tmpl := range BuiltinTemplates() {
 		p := tmpl.Profile
 		p.Name = tmpl.Name
+		if tmpl.NeedsAgent() {
+			p.Agents = []AgentConfig{{ID: "codex"}}
+		}
 		if err := p.Validate(); err != nil {
 			t.Errorf("template %q is invalid: %v", tmpl.Name, err)
 		}
+	}
+}
+
+func TestAgentNamedTemplatesImplyTheirAgent(t *testing.T) {
+	for name, want := range map[string]string{"codex": "codex", "gemini": "gemini-cli", "claude-strict": "claude-code", "claude-dev": "claude-code"} {
+		tmpl, ok := GetTemplate(name)
+		if !ok {
+			t.Fatalf("template %s missing", name)
+		}
+		if len(tmpl.Profile.Agents) != 1 || tmpl.Profile.Agents[0].ID != want {
+			t.Errorf("%s: agents %+v, want %s", name, tmpl.Profile.Agents, want)
+		}
+	}
+	// Agent-named aliases must not leak their agent into the shared template.
+	if tmpl, _ := GetTemplate("standard"); !tmpl.NeedsAgent() {
+		t.Errorf("standard should leave the agent open, got %+v", tmpl.Profile.Agents)
+	}
+}
+
+func TestLockdownRefusesFullAgentPermissions(t *testing.T) {
+	tmpl, _ := GetTemplate("lockdown")
+	p := tmpl.Profile
+	p.Name = "x"
+	p.Agents = []AgentConfig{{ID: "codex"}}
+	p.Security.AgentPermissions = PermissionsFull
+	if err := p.Validate(); err == nil {
+		t.Error("lockdown must refuse agent_permissions: full")
+	}
+	p.Security.AgentPermissions = PermissionsEdit
+	if err := p.Validate(); err != nil {
+		t.Errorf("lockdown should allow edit: %v", err)
+	}
+	if got := p.Resolve().AgentPermissions; got != PermissionsEdit {
+		t.Errorf("effective permissions %q", got)
 	}
 }
 

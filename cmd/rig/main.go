@@ -71,7 +71,7 @@ func main() {
 	}
 	add("start", newCmd(), runCmd(), templatesCmd(), agentsCmd(), levelsCmd())
 	add("security", checkCmd(), doctorCmd(), monitorCmd(), auditCmd())
-	add("config", editCmd(), allowCmd(), addCmd(), showCmd(), presetsCmd(), exportCmd(), importCmd(), listCmd())
+	add("config", setCmd(), editCmd(), allowCmd(), addCmd(), showCmd(), presetsCmd(), exportCmd(), importCmd(), listCmd())
 	add("manage", psCmd(), shellCmd(), execCmd(), stopCmd(), rmCmd(), buildCmd(), logsCmd(), cpCmd(),
 		statsCmd(), topCmd(), diffCmd(), pauseCmd(), unpauseCmd(), commitCmd(), renameCmd())
 	// Older names, kept so scripts keep working.
@@ -220,3 +220,6 @@ func paint(style, s string) string {
 	}
 	return "\033[" + style + "m" + s + "\033[0m"
 }
+
+// newRunnerQuiet returns a runner, or an error instead of exiting.
+func newRunnerQuiet() (*container.Runner, error) { return container.NewRunner() }

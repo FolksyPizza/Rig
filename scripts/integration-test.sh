@@ -209,7 +209,7 @@ if skipping claude; then
 	echo "skip  the Claude Code image"
 else
 	echo "== Claude Code"
-	"$rig" new cc >/dev/null
+	"$rig" new cc --agent claude-code >/dev/null
 	expect_output "Claude Code installs and starts in a standard sandbox" '[0-9]+\.[0-9]+' "$rig" run cc -- claude --version
 fi
 

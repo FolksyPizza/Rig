@@ -183,6 +183,12 @@ func planMCP(p *config.Profile, eff config.Effective, specs []agents.AgentSpec) 
 		if len(entries) > 0 {
 			cfg["mcp"] = openCodeServers(entries)
 		}
+		switch eff.AgentPermissions {
+		case config.PermissionsEdit:
+			cfg["permission"] = map[string]string{"edit": "allow", "bash": "ask", "webfetch": "ask"}
+		case config.PermissionsFull:
+			cfg["permission"] = map[string]string{"edit": "allow", "bash": "allow", "webfetch": "allow"}
+		}
 		b, err := json.MarshalIndent(cfg, "", "  ")
 		if err != nil {
 			return plan, err

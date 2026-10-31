@@ -9,7 +9,6 @@ import (
 	"strconv"
 	"strings"
 	"text/tabwriter"
-	"time"
 
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
@@ -19,141 +18,6 @@ import (
 	"github.com/FolksyPizza/rig/internal/container"
 )
 
-func newCmd() *cobra.Command {
-	var (
-		from, level, isolation, network, ai string
-		agentIDs, allow, presets, mounts    []string
-		ports, tools                        []string
-		ephemeral, persistent, run, force   bool
-		sudo                                bool
-	)
-	cmd := &cobra.Command{
-		Use:   "new <name>",
-		Short: "Create a sandbox",
-		Long: `Create a saved sandbox. With no options you get Claude Code at the standard
-security level: an egress allowlist (the agent's API plus GitHub, npm and PyPI),
-known exfiltration sites blocked, and monitoring that stops clear attacks.
-
-  rig new work                                  the recommended starting point
-  rig new work --agent codex --level strict     another agent, stricter
-  rig new work --from lockdown                  start from a template ('rig templates')
-  rig new work --mount ./project:/home/sandbox/project:rw
-  rig new local --from local-model              a local model, no internet at all
-  rig new dev --level open --sudo --tool tmux   passwordless sudo and extra packages
-
-Mounts are read-only unless you add :rw. Change anything later with
-'rig edit', 'rig allow' or 'rig add'.`,
-		Args: cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			store, err := config.NewStore()
-			if err != nil {
-				return err
-			}
-			name := args[0]
-			if store.Exists(name) && !force {
-				return fmt.Errorf("sandbox %q already exists; pass --force to replace it", name)
-			}
-			if from == "" {
-				from = "standard"
-			}
-			tmpl, ok := config.GetTemplate(from)
-			if !ok {
-				return fmt.Errorf("template %q not found (see 'rig templates')", from)
-			}
-			p := tmpl.Profile
-			p.Name = name
-			p.Metadata.CreatedAt = time.Now().UTC()
-
-			if len(agentIDs) > 0 {
-				if p.Agents, err = agentConfigs(agentIDs); err != nil {
-					return err
-				}
-			}
-			if level != "" {
-				p.Security.Level = level
-				if level == config.LevelLockdown && !persistent {
-					p.Persistence = "ephemeral"
-				}
-				// A template's sudo does not carry over to a level that
-				// forbids it; --sudo still reports the conflict.
-				if config.LevelRank(level) > config.LevelRank(config.LevelStandard) && !sudo {
-					p.Security.Sudo = false
-				}
-				if level != config.LevelOpen && p.Network.Mode == "unrestricted" && network == "" {
-					p.Network = config.NetworkConfig{Mode: "allowlist", Presets: []string{"github", "npm", "pypi"}}
-				}
-			}
-			if isolation != "" {
-				p.Security.Isolation = isolation
-			}
-			if network != "" {
-				p.Network.Mode = network
-			}
-			if sudo {
-				p.Security.Sudo = true
-			}
-			p.Tools = editList(p.Tools, tools, false)
-			p.Network.AllowedDomains = append(p.Network.AllowedDomains, allow...)
-			p.Network.Presets = append(p.Network.Presets, presets...)
-			for _, m := range mounts {
-				mc, err := parseMount(m)
-				if err != nil {
-					return err
-				}
-				p.Mounts = append(p.Mounts, mc)
-			}
-			for _, s := range ports {
-				hp, err := parsePort(s)
-				if err != nil {
-					return err
-				}
-				p.Host.Ports = append(p.Host.Ports, hp)
-			}
-			if ai != "" {
-				provider, model, _ := strings.Cut(ai, ":")
-				p.Monitor.AI = config.AIConfig{Provider: provider, Model: model}
-			}
-			switch {
-			case ephemeral && persistent:
-				return fmt.Errorf("choose either --ephemeral or --persistent")
-			case ephemeral:
-				p.Persistence = "ephemeral"
-			case persistent:
-				p.Persistence = "persistent"
-			}
-
-			if err := store.Save(&p); err != nil {
-				return err
-			}
-			eff := p.Resolve()
-			fmt.Printf("  Created %s: %s at level %s (%s).\n", paint("1", name), agentNames(&p), eff.Level, describeNetwork(eff))
-			if run {
-				return launch(&p, container.RunOptions{})
-			}
-			fmt.Printf("  Next: 'rig run %s' to start it, 'rig check %s' to see what it can reach.\n", name, name)
-			return nil
-		},
-	}
-	f := cmd.Flags()
-	f.StringVar(&from, "from", "", "start from a template (default \"standard\"; see 'rig templates')")
-	f.StringSliceVar(&agentIDs, "agent", nil, "agent to install, repeatable (see 'rig agents')")
-	f.StringVar(&level, "level", "", "security level: open, standard, strict or lockdown")
-	f.StringVar(&isolation, "isolation", "", "auto, container, gvisor or vm")
-	f.StringVar(&network, "network", "", "allowlist, none, or unrestricted (open level only)")
-	f.StringSliceVar(&allow, "allow", nil, "allow a domain, repeatable (\"*.example.com\" includes subdomains)")
-	f.StringSliceVar(&presets, "preset", nil, "allow a group of domains, repeatable (see 'rig presets')")
-	f.StringSliceVar(&mounts, "mount", nil, "mount a host directory: SRC:DST[:rw] (read-only unless :rw)")
-	f.StringSliceVar(&ports, "port", nil, "let the sandbox reach a service on this machine: NAME:PORT[:HOSTPORT]")
-	f.StringSliceVar(&tools, "tool", nil, "install an extra apt package, repeatable (more with 'rig add')")
-	f.BoolVar(&sudo, "sudo", false, "give the agent passwordless sudo (open and standard levels only)")
-	f.StringVar(&ai, "ai-monitor", "", "add an AI monitor: anthropic, openai:MODEL or ollama:MODEL")
-	f.BoolVar(&ephemeral, "ephemeral", false, "remove the container when you exit")
-	f.BoolVar(&persistent, "persistent", false, "keep the container between runs")
-	f.BoolVar(&run, "run", false, "start the sandbox right away")
-	f.BoolVar(&force, "force", false, "replace an existing sandbox with the same name")
-	return cmd
-}
-
 // agentConfigs builds agent entries, passing through the API keys each agent
 // usually needs as ${VAR} references (resolved at launch, never stored).
 func agentConfigs(ids []string) ([]config.AgentConfig, error) {
@@ -162,7 +26,11 @@ func agentConfigs(ids []string) ([]config.AgentConfig, error) {
 		id, version, _ := strings.Cut(raw, "@")
 		spec, ok := agents.ByID(id)
 		if !ok {
-			return nil, fmt.Errorf("unknown agent %q (see 'rig agents')", id)
+			msg := fmt.Sprintf("unknown agent %q (see 'rig agents')", id)
+			for _, err := range agents.CustomErrors() {
+				msg += fmt.Sprintf("\n  a custom agent definition was skipped: %v", err)
+			}
+			return nil, fmt.Errorf("%s", msg)
 		}
 		ac := config.AgentConfig{ID: id, Version: version, Env: map[string]string{}}
 		for _, h := range spec.EnvHints {
@@ -466,12 +334,16 @@ func templatesCmd() *cobra.Command {
 			fmt.Fprintln(w, "TEMPLATE\tLEVEL\tAGENTS\tDESCRIPTION")
 			for _, t := range config.BuiltinTemplates() {
 				p := t.Profile
-				fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", t.Name, p.EffectiveLevel(), agentNames(&p), t.Description)
+				names := agentNames(&p)
+				if t.NeedsAgent() {
+					names = "any"
+				}
+				fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", t.Name, p.EffectiveLevel(), names, t.Description)
 			}
 			if err := w.Flush(); err != nil {
 				return err
 			}
-			fmt.Println("\nUse one with: rig new <name> --from <template>")
+			fmt.Println("\nUse one with: rig new <name> --from <template> --agent <agent>")
 			return nil
 		},
 	}
