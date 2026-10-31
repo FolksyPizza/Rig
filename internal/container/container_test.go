@@ -935,3 +935,17 @@ func TestOpenCodePermissionsGoInItsConfig(t *testing.T) {
 		t.Errorf("opencode.json:\n%s", cfg)
 	}
 }
+
+func TestProfileFromLabelsDockerAndPodman(t *testing.T) {
+	for in, want := range map[string]string{
+		"rig.profile=work,rig.role=sandbox":      "work",
+		"map[rig.profile:work rig.role:sandbox]": "work",
+		"map[rig.role:sandbox rig.profile:bg-2]": "bg-2",
+		"map[other:x]":                           "",
+		"other=x":                                "",
+	} {
+		if got := profileFromLabels(in); got != want {
+			t.Errorf("profileFromLabels(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

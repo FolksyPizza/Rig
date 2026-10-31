@@ -88,3 +88,13 @@ func TestMonitorObserveModeDoesNotKill(t *testing.T) {
 }
 
 func providerStats(pids int) provider.Stats { return provider.Stats{PIDs: pids} }
+
+func TestEngineInitIsNotAScratchProgram(t *testing.T) {
+	r := NewRules(0, true)
+	if o := r.Process("podman-init", "/run/podman-init -- /usr/local/bin/rig-entrypoint sleep infinity"); o.Kind != "process_started" {
+		t.Errorf("Podman's init flagged: %+v", o)
+	}
+	if o := r.Process("evil", "/run/evil --connect"); o.Kind != "exec_from_temp" {
+		t.Errorf("a program under /run should still be flagged: %+v", o)
+	}
+}

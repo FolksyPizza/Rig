@@ -217,6 +217,10 @@ var suspiciousTools = map[string]bool{
 	"mitmproxy": true, "responder": true, "bore": true,
 }
 
+// engineInits are the init programs engines run as a container's first
+// process. Podman's lives under /run but is mounted read-only by the engine.
+var engineInits = map[string]bool{"/run/podman-init": true, "/dev/init": true, "/sbin/docker-init": true}
+
 // tempDirs are scratch locations a program should not normally run from.
 var tempDirs = []string{"/tmp/", "/var/tmp/", "/dev/shm/", "/run/"}
 
@@ -251,7 +255,7 @@ func (r *Rules) Process(comm, args string) watchdog.Observation {
 		return obs("process", "suspicious_tool", watchdog.SevHigh, raw, "started %s, a scanning/tunnelling/cracking tool: %s", base, clip(args, 160))
 	}
 	for _, d := range tempDirs {
-		if strings.HasPrefix(first, d) {
+		if strings.HasPrefix(first, d) && !engineInits[first] {
 			sev := watchdog.SevMedium
 			if r.ExecFromTempIsSevere {
 				sev = watchdog.SevHigh

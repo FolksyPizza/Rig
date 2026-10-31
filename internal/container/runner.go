@@ -468,7 +468,17 @@ func (r *Runner) list(ctx context.Context, labelFilters ...string) []ContainerIn
 	return containers
 }
 
+// profileFromLabels reads the profile label from 'ps --format {{.Labels}}',
+// which Docker prints as "k=v,k=v" and Podman as "map[k:v k:v]".
 func profileFromLabels(labels string) string {
+	if inner, ok := strings.CutPrefix(labels, "map["); ok {
+		for _, kv := range strings.Fields(strings.TrimSuffix(inner, "]")) {
+			if name, ok := strings.CutPrefix(kv, LabelProfile+":"); ok {
+				return name
+			}
+		}
+		return ""
+	}
 	for _, kv := range strings.Split(labels, ",") {
 		if name, ok := strings.CutPrefix(kv, LabelProfile+"="); ok {
 			return name
@@ -486,6 +496,14 @@ func (r *Runner) ContainerStats(ctx context.Context, containerName string) (stri
 		return "", err
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+// WaitGone waits until a container is no longer running, up to d.
+func (r *Runner) WaitGone(ctx context.Context, name string, d time.Duration) {
+	deadline := time.Now().Add(d)
+	for r.containerRunning(ctx, name) && time.Now().Before(deadline) {
+		time.Sleep(200 * time.Millisecond)
+	}
 }
 
 // UpdateResources changes a container's CPU, memory and process limits in
