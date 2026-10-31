@@ -1,6 +1,6 @@
 BINARY := rig
 BUILD_DIR := bin
-VERSION := 0.2.0
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 PREFIX := /usr/local
 GO := $(shell command -v go 2>/dev/null || echo "$(HOME)/go-sdk/go/bin/go")
 

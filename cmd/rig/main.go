@@ -22,24 +22,16 @@ import (
 
 var version = "dev"
 
-const guide = `Rig runs AI coding agents in locked-down sandboxes.
+// quickStart opens the help screen. The command list below it is generated
+// from the commands themselves, so 'rig', 'rig help' and 'rig --help' always
+// show the same, complete picture.
+const quickStart = `Rig runs AI coding agents in locked-down sandboxes.
 
-Start here:
-  rig new work                 create a sandbox (Claude Code, standard security)
-  rig run work                 build it if needed and open a shell inside
+Quick start:
+  rig new                      create a sandbox: pick the agent, security level and resources
+  rig run work                 start it and open a shell (-d runs it in the background)
   rig check work               see exactly what it can and cannot reach
-
-Pick an agent or a stricter level:
-  rig new work --agent codex --level strict
-  rig templates                ready-made setups: lockdown, local-model, blender, ...
-  rig agents                   every agent Rig can install
-
-Watch it:
-  rig audit work               what the sandbox did: connections, tool calls, processes
-  rig monitor work             live view of a running sandbox
-
-Security levels: open < standard (default) < strict < lockdown    (rig levels)
-Every command: rig help
+  rig blocked work             see what Rig blocked, and allow what you need
 `
 
 func main() {
@@ -48,19 +40,18 @@ func main() {
 	root := &cobra.Command{
 		Use:   "rig",
 		Short: "Run AI coding agents in locked-down sandboxes",
-		Long:  guide,
 		Args:  cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
-			fmt.Print(guide)
+			printOverview(cmd)
 		},
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
 	root.AddGroup(
-		&cobra.Group{ID: "start", Title: "Getting started:"},
-		&cobra.Group{ID: "security", Title: "Security:"},
-		&cobra.Group{ID: "config", Title: "Configure a sandbox:"},
-		&cobra.Group{ID: "manage", Title: "Manage running sandboxes:"},
+		&cobra.Group{ID: "start", Title: "Use a sandbox"},
+		&cobra.Group{ID: "config", Title: "Configure"},
+		&cobra.Group{ID: "security", Title: "Watch and check"},
+		&cobra.Group{ID: "manage", Title: "Manage"},
 	)
 
 	add := func(group string, cmds ...*cobra.Command) {
@@ -69,13 +60,36 @@ func main() {
 			root.AddCommand(c)
 		}
 	}
-	add("start", newCmd(), runCmd(), templatesCmd(), agentsCmd(), levelsCmd())
-	add("security", checkCmd(), doctorCmd(), monitorCmd(), auditCmd())
-	add("config", setCmd(), editCmd(), allowCmd(), blockedCmd(), addCmd(), showCmd(), presetsCmd(), exportCmd(), importCmd(), listCmd())
-	add("manage", psCmd(), shellCmd(), execCmd(), stopCmd(), rmCmd(), buildCmd(), logsCmd(), cpCmd(),
-		statsCmd(), topCmd(), diffCmd(), pauseCmd(), unpauseCmd(), commitCmd(), renameCmd())
-	// Older names, kept so scripts keep working.
-	root.AddCommand(destroyCmd(), deleteCmd(), inspectCmd(), templateCmd(), versionCmd(), superviseCmd())
+	add("start", newCmd(), runCmd(), shellCmd(), execCmd(), stopCmd(), psCmd(), listCmd())
+	add("config", setCmd(), allowCmd(), blockedCmd(), addCmd(), editCmd(), showCmd(),
+		templatesCmd(), agentsCmd(), levelsCmd(), presetsCmd(), exportCmd(), importCmd())
+	add("security", checkCmd(), monitorCmd(), auditCmd(), doctorCmd())
+	add("manage", updateCmd(), rmCmd(), buildCmd(), logsCmd(), cpCmd(), statsCmd(), topCmd(), diffCmd(),
+		pauseCmd(), unpauseCmd(), commitCmd(), renameCmd(), versionCmd())
+	// Older names, kept so scripts keep working, and internals.
+	root.AddCommand(destroyCmd(), deleteCmd(), inspectCmd(), templateCmd(), superviseCmd())
+
+	// The root's help is the overview; each command keeps cobra's help.
+	defaultHelp := root.HelpFunc()
+	root.SetHelpFunc(func(cmd *cobra.Command, args []string) {
+		if cmd == root {
+			printOverview(cmd)
+			return
+		}
+		defaultHelp(cmd, args)
+	})
+	root.SetHelpCommand(&cobra.Command{
+		Use:   "help [command]",
+		Short: "Explain a command and its options",
+		Run: func(cmd *cobra.Command, args []string) {
+			target, _, err := root.Find(args)
+			if err != nil || target == nil || len(args) == 0 {
+				printOverview(root)
+				return
+			}
+			_ = target.Help()
+		},
+	})
 
 	if err := root.Execute(); err != nil {
 		var ec exitError
@@ -88,6 +102,25 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// printOverview prints the one help screen: a quick start, then every
+// command by group.
+func printOverview(root *cobra.Command) {
+	fmt.Print(quickStart)
+	for _, g := range root.Groups() {
+		fmt.Printf("\n%s:\n", g.Title)
+		for _, c := range root.Commands() {
+			if c.GroupID == g.ID && c.IsAvailableCommand() {
+				fmt.Printf("  %-10s %s\n", c.Name(), c.Short)
+			}
+		}
+	}
+	fmt.Print(`
+Security levels: open < standard (default) < strict < lockdown   ('rig levels')
+Agents: Claude Code, Codex, Gemini CLI, Pi, OpenCode, Qwen Code, Crush, Aider, Copilot and more ('rig agents')
+'rig help <command>' explains a command and all its options.
+`)
 }
 
 // exitError ends the program with a specific status.

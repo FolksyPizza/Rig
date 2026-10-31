@@ -39,6 +39,9 @@ jobs:
       - name: Test
         run: go test -race ./...
 
+      - name: Install script syntax
+        run: sh -n install.sh && bash -n scripts/integration-test.sh
+
       - name: Cross-compile
         run: |
           for target in darwin/arm64 darwin/amd64 windows/amd64 linux/arm64; do

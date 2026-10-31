@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -565,9 +566,9 @@ func templateCmd() *cobra.Command {
 func versionCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "version",
-		Short: "Print the version of rig",
+		Short: "Print Rig's version",
 		Run: func(cmd *cobra.Command, args []string) {
-			fmt.Printf("rig %s\n", version)
+			fmt.Printf("rig %s (%s/%s)\n", version, runtime.GOOS, runtime.GOARCH)
 		},
 	}
 }
