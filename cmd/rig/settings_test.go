@@ -67,3 +67,25 @@ func TestApplyLevelLockdownTightens(t *testing.T) {
 		t.Error("unknown level accepted")
 	}
 }
+
+func TestRunFromNeutralTemplatePicksAnAgent(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("OPENAI_API_KEY", "sk-test")
+	store, err := config.NewStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := createFromTemplate(store, "lockdown", "safe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Agents) != 1 || p.Agents[0].ID != "codex" || p.Agents[0].Env["OPENAI_API_KEY"] != "${OPENAI_API_KEY}" {
+		t.Errorf("agents: %+v", p.Agents)
+	}
+	t.Setenv("OPENAI_API_KEY", "")
+	if _, err := createFromTemplate(store, "standard", "none"); err == nil {
+		t.Error("without --agent or an API key, creating from a neutral template should ask for an agent")
+	}
+}

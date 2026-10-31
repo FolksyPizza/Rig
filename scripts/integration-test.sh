@@ -46,7 +46,7 @@ expect_output() {
 }
 
 cleanup() {
-	for name in std tight safe bg mcp gwmcp relay cc; do "$rig" rm "$name" --all --yes >/dev/null 2>&1 || true; done
+	for name in std tight safe bg quiet mcp gwmcp relay cc; do "$rig" rm "$name" --all --yes >/dev/null 2>&1 || true; done
 	[ -n "${web_pid:-}" ] && kill "$web_pid" 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -122,6 +122,12 @@ expect 0 "it starts again in the background" "$rig" run bg -d
 expect 0 "rig stop ends it" "$rig" stop bg
 sleep 3
 if pgrep -f "_supervise bg" >/dev/null; then fail "the background monitor exits with the sandbox"; else pass "the background monitor exits with the sandbox"; fi
+
+"$rig" new quiet --agent testagent --monitor off >/dev/null
+expect 0 "a background sandbox with monitoring off starts" "$rig" run quiet -d
+sleep 5
+expect_output "and keeps running" 'rig-quiet .*Up' "$rig" ps
+expect 0 "rig stop ends it" "$rig" stop quiet
 
 echo "== settings"
 expect_output "rig set shows the settings" 'permissions +ask' "$rig" set bg
@@ -229,6 +235,9 @@ sleep 1
 "$rig" new relay --agent testagent --port "web:$port" >/dev/null
 expect_output "a listed host port is reachable through the gateway" 'hello from the host' "$rig" run relay -- curl -fsS --max-time 30 "http://rig-gw:$port/"
 expect 7 "an unlisted port is not" "$rig" run relay -- curl -sS -o /dev/null --max-time 10 "http://rig-gw:$((port + 1))/"
+expect 0 "--keep-running hands the sandbox to a background monitor" "$rig" run relay --keep-running -- true
+expect_output "the host port still works after that session left" 'hello from the host' "$rig" exec relay -- curl -fsS --max-time 30 "http://rig-gw:$port/"
+"$rig" stop relay >/dev/null 2>&1 || true
 
 if skipping claude; then
 	echo "skip  the Claude Code image"

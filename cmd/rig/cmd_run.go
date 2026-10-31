@@ -92,6 +92,17 @@ func createFromTemplate(store *config.Store, template, name string) (*config.Pro
 	p := t.Profile
 	p.Name = name
 	p.Metadata.CreatedAt = time.Now().UTC()
+	if t.NeedsAgent() {
+		ids, err := pickAgents(interactiveTerminal())
+		if err != nil {
+			return nil, err
+		}
+		if p.Agents, err = agentConfigs(ids); err != nil {
+			return nil, err
+		}
+	} else {
+		p.Agents = fillAgentEnv(p.Agents)
+	}
 	if err := store.Save(&p); err != nil {
 		return nil, err
 	}

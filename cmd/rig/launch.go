@@ -218,7 +218,14 @@ func launch(profile *config.Profile, opts container.RunOptions) error {
 	handedOff := false
 	if opts.KeepRunning && cause == nil && !eff.Ephemeral && runner.Running(context.Background(), prepared.Name) && supervisorFor(profile.Name, prepared.Name) == 0 {
 		// --keep-running: hand the sandbox to a background Rig process so
-		// it stays monitored after you leave.
+		// it stays monitored after you leave. A gateway this process owns
+		// would end with it, so it is stopped first and the background
+		// process starts its own.
+		if sr.gw != nil && !sr.gw.Shared {
+			sr.gw.Stop()
+			sr.gw = nil
+			runner.WaitGone(context.Background(), container.GatewayName(profile.Name), 10*time.Second)
+		}
 		if err := spawnSupervisor(profile, container.RunOptions{Container: prepared.Name}); err != nil {
 			fmt.Fprintf(os.Stderr, "  Warning: could not keep %s running in the background: %v\n", prepared.Name, err)
 		} else {
@@ -300,22 +307,16 @@ func finishSession(runner *container.Runner, profileName, name string, quiet boo
 }
 
 // teardownIfIdle removes the proxy, gateway and networks once no sandbox of
-// the profile is running. They are recreated on the next start.
+// the profile is left. While stopped instances exist the proxy stays, so its
+// address (which gVisor, VM and Podman sandboxes hold as a hosts entry, and a
+// read-only one cannot update) does not change under them.
 func teardownIfIdle(r *container.Runner, nm *container.NetworkManager, profileName string) {
 	if nm == nil {
 		return
 	}
-	instances := r.ListByProfile(context.Background(), profileName)
-	for _, c := range instances {
-		if c.Running {
-			return
-		}
+	if len(r.ListByProfile(context.Background(), profileName)) == 0 {
+		nm.Teardown(context.Background(), profileName)
 	}
-	if len(instances) > 0 {
-		nm.StopServices(context.Background(), profileName)
-		return
-	}
-	nm.Teardown(context.Background(), profileName)
 }
 
 func describeAllowlist(eff config.Effective) string {

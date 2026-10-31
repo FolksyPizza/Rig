@@ -239,6 +239,9 @@ func supervise(profile *config.Profile, opts container.RunOptions, ready func(st
 	sess := openSession(profile.Name, name)
 	monCtx, monCancel := context.WithCancel(ctx)
 	results := sr.monitor(monCtx, nil)
+	if sr.eff.MonitorMode == "off" {
+		results = nil // nothing to wait for; run until the sandbox stops
+	}
 	if opts.Timeout > 0 {
 		go func() {
 			select {
