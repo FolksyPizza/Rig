@@ -75,7 +75,7 @@ func main() {
 	add("manage", psCmd(), shellCmd(), execCmd(), stopCmd(), rmCmd(), buildCmd(), logsCmd(), cpCmd(),
 		statsCmd(), topCmd(), diffCmd(), pauseCmd(), unpauseCmd(), commitCmd(), renameCmd())
 	// Older names, kept so scripts keep working.
-	root.AddCommand(destroyCmd(), deleteCmd(), inspectCmd(), templateCmd(), versionCmd())
+	root.AddCommand(destroyCmd(), deleteCmd(), inspectCmd(), templateCmd(), versionCmd(), superviseCmd())
 
 	if err := root.Execute(); err != nil {
 		var ec exitError

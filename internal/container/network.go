@@ -344,6 +344,13 @@ func (nm *NetworkManager) Teardown(ctx context.Context, profileName string) {
 	_ = exec.CommandContext(ctx, nm.bin, "network", "rm", nm.EgressNetworkName(profileName)).Run()
 }
 
+// StopServices removes the proxy and the gateway but keeps the networks, which
+// stopped sandboxes stay attached to and need when they start again.
+func (nm *NetworkManager) StopServices(ctx context.Context, profileName string) {
+	_ = exec.CommandContext(ctx, nm.bin, "rm", "-f", nm.ProxyName(profileName)).Run()
+	_ = exec.CommandContext(ctx, nm.bin, "rm", "-f", GatewayName(profileName)).Run()
+}
+
 // ProxyLogs streams the proxy's JSON log from now on. The caller reads
 // stdout and must call Wait or kill the command.
 func (nm *NetworkManager) ProxyLogs(ctx context.Context, profileName string, since time.Time) *exec.Cmd {

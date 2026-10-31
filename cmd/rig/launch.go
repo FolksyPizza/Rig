@@ -60,26 +60,39 @@ func ensureImage(ctx context.Context, b *container.Builder, profile *config.Prof
 	return nil
 }
 
-// launch builds, wires and enters a sandbox, then cleans up after it.
-func launch(profile *config.Profile, opts container.RunOptions) error {
-	ctx, cancel := signalContext()
-	defer cancel()
+// sandboxRun is a sandbox wired up and ready to enter: image built, egress
+// filter and gateway running, container started.
+type sandboxRun struct {
+	profile  *config.Profile
+	eff      config.Effective
+	prov     provider.Provider
+	iso      container.Isolation
+	runner   *container.Runner
+	nm       *container.NetworkManager
+	setup    *container.NetworkSetup
+	gw       *container.Gateway
+	gwLines  chan []byte
+	prepared *container.Prepared
+}
 
-	eff := profile.Resolve()
-	prov, err := engineFor(eff)
-	if err != nil {
-		return err
+// prepareSandbox builds and wires a sandbox. quiet leaves out the progress
+// lines meant for an interactive session.
+func prepareSandbox(ctx context.Context, profile *config.Profile, opts container.RunOptions, quiet bool) (*sandboxRun, error) {
+	sr := &sandboxRun{profile: profile, eff: profile.Resolve(), gwLines: make(chan []byte, 256)}
+	eff := sr.eff
+	var err error
+	if sr.prov, err = engineFor(eff); err != nil {
+		return nil, err
 	}
-	info, err := provider.Inspect(ctx, prov)
+	info, err := provider.Inspect(ctx, sr.prov)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	iso, err := container.ResolveIsolation(eff, info)
-	if err != nil {
-		return err
+	if sr.iso, err = container.ResolveIsolation(eff, info); err != nil {
+		return nil, err
 	}
-	if iso.Note != "" {
-		fmt.Fprintf(os.Stderr, "  Note: %s.\n", iso.Note)
+	if sr.iso.Note != "" && !quiet {
+		fmt.Fprintf(os.Stderr, "  Note: %s.\n", sr.iso.Note)
 	}
 	if missing := config.MissingEnvVars(profile); len(missing) > 0 {
 		fmt.Fprintf(os.Stderr, "  Warning: these variables are not set on this machine and will be empty in the sandbox: %s\n", strings.Join(missing, ", "))
@@ -87,85 +100,102 @@ func launch(profile *config.Profile, opts container.RunOptions) error {
 
 	builder, err := container.NewBuilder()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if err := ensureImage(ctx, builder, profile, false); err != nil {
-		return err
+		return nil, err
+	}
+	if sr.runner, err = container.NewRunner(); err != nil {
+		return nil, err
 	}
 
-	runner, err := container.NewRunner()
-	if err != nil {
-		return err
-	}
-
-	var setup *container.NetworkSetup
-	var nm *container.NetworkManager
 	if eff.NetworkMode == "allowlist" {
 		helperTag, err := builder.EnsureHelperImage(ctx, func(e container.BuildEvent) { fmt.Println(e.Stream) })
 		if err != nil {
-			return err
+			return nil, err
 		}
-		if nm, err = container.NewNetworkManager(); err != nil {
-			return err
+		if sr.nm, err = container.NewNetworkManager(); err != nil {
+			return nil, err
 		}
-		if len(opts.Command) == 0 {
+		if !quiet {
 			fmt.Printf("  Starting the egress filter (%s)...\n", describeAllowlist(eff))
 		}
-		setup, err = nm.Setup(ctx, profile, eff, helperTag)
+		sr.setup, err = sr.nm.Setup(ctx, profile, eff, helperTag)
 		if err != nil {
-			return fmt.Errorf("network setup failed, refusing to launch an unfiltered sandbox: %w", err)
+			return nil, fmt.Errorf("network setup failed, refusing to launch an unfiltered sandbox: %w", err)
 		}
 	}
 
-	gwLines := make(chan []byte, 256)
-	var gw *container.Gateway
 	if eff.NeedsGateway {
-		if len(opts.Command) == 0 {
+		if !quiet {
 			fmt.Println("  Starting the gateway (MCP, git broker, host ports)...")
 		}
-		gw, err = runner.StartGateway(ctx, profile, container.GatewayOptions{
+		sr.gw, err = sr.runner.StartGateway(ctx, profile, container.GatewayOptions{
 			Image:   profile.ImageTag(),
-			Network: setup.Network,
-			Token:   setup.GatewayToken,
-			Runtime: iso.Runtime,
-			ProxyIP: setup.ProxyIP,
+			Network: sr.setup.Network,
+			Token:   sr.setup.GatewayToken,
+			Runtime: sr.iso.Runtime,
+			ProxyIP: sr.setup.ProxyIP,
 			OnLog: func(line []byte) {
 				select {
-				case gwLines <- line:
+				case sr.gwLines <- line:
 				default: // never block the gateway on a slow monitor
 				}
 			},
 		})
 		if err != nil {
-			teardownIfIdle(runner, nm, profile.Name)
-			return err
+			teardownIfIdle(sr.runner, sr.nm, profile.Name)
+			return nil, err
 		}
 	}
 
-	spec := container.LaunchSpec{Profile: profile, Effective: eff, Isolation: iso, Network: setup, Gateway: eff.NeedsGateway}
-	if eff.NeedsGateway && setup != nil {
-		spec.GatewayIP = runner.ContainerIP(ctx, container.GatewayName(profile.Name), setup.Network)
+	spec := container.LaunchSpec{Profile: profile, Effective: eff, Isolation: sr.iso, Network: sr.setup, Gateway: eff.NeedsGateway}
+	if eff.NeedsGateway && sr.setup != nil {
+		spec.GatewayIP = sr.runner.ContainerIP(ctx, container.GatewayName(profile.Name), sr.setup.Network)
 	}
-	prepared, err := runner.Prepare(ctx, spec, opts)
+	if sr.prepared, err = sr.runner.Prepare(ctx, spec, opts); err != nil {
+		sr.gw.Stop()
+		teardownIfIdle(sr.runner, sr.nm, profile.Name)
+		return nil, err
+	}
+	return sr, nil
+}
+
+// monitor starts the monitoring pipeline for the sandbox.
+func (sr *sandboxRun) monitor(ctx context.Context, blocked *blockedHosts) <-chan *watchdog.Observation {
+	return startMonitor(ctx, sr.profile, sr.eff, sr.runner, sr.prov, sr.prepared.Name, sr.setup, sr.gwLines, false, blocked)
+}
+
+// launch builds, wires and enters a sandbox, then cleans up after it.
+func launch(profile *config.Profile, opts container.RunOptions) error {
+	if opts.Detach {
+		return startBackground(profile, opts)
+	}
+	ctx, cancel := signalContext()
+	defer cancel()
+
+	sr, err := prepareSandbox(ctx, profile, opts, len(opts.Command) > 0)
 	if err != nil {
-		gw.Stop()
-		teardownIfIdle(runner, nm, profile.Name)
 		return err
 	}
+	eff, runner, prepared := sr.eff, sr.runner, sr.prepared
 
 	sess := openSession(profile.Name, prepared.Name)
-	if opts.KeepRunning && !eff.Ephemeral {
-		setKeepRunning(profile.Name, prepared.Name, true)
-	}
-
 	if len(opts.Command) == 0 {
-		fmt.Printf("\n  Entering %s %s\n", paint("1;35", profile.Name), paint("2", "("+banner(eff, iso)+")"))
+		fmt.Printf("\n  Entering %s %s\n", paint("1;35", profile.Name), paint("2", "("+banner(eff, sr.iso)+")"))
 		fmt.Printf("  Type 'exit' to leave.\n\n")
 	}
 
+	// A background Rig process already monitors a sandbox started with -d;
+	// this session shows its alerts instead of monitoring a second time.
 	monCtx, monCancel := context.WithCancel(ctx)
 	blocked := &blockedHosts{}
-	results := startMonitor(monCtx, profile, eff, runner, prov, prepared.Name, setup, gwLines, false, blocked)
+	var results <-chan *watchdog.Observation
+	if sup := supervisorFor(profile.Name, prepared.Name); sup > 0 {
+		results = followAlerts(monCtx, profile.Name, prepared.Name, notifier(false, profile.Name, blocked))
+	} else {
+		results = sr.monitor(monCtx, blocked)
+	}
 	pushTitle()
 	runErr := runner.Attach(ctx, prepared, opts)
 	popTitle()
@@ -185,14 +215,24 @@ func launch(profile *config.Profile, opts container.RunOptions) error {
 	case <-time.After(5 * time.Second):
 	}
 	sess.close()
+	handedOff := false
+	if opts.KeepRunning && cause == nil && !eff.Ephemeral && runner.Running(context.Background(), prepared.Name) && supervisorFor(profile.Name, prepared.Name) == 0 {
+		// --keep-running: hand the sandbox to a background Rig process so
+		// it stays monitored after you leave.
+		if err := spawnSupervisor(profile, container.RunOptions{Container: prepared.Name}); err != nil {
+			fmt.Fprintf(os.Stderr, "  Warning: could not keep %s running in the background: %v\n", prepared.Name, err)
+		} else {
+			handedOff = true
+		}
+	}
 	if !eff.Ephemeral && cause == nil {
 		finishSession(runner, profile.Name, prepared.Name, len(opts.Command) > 0)
 	}
-	if gw != nil && !gw.Shared && cause == nil {
+	if sr.gw != nil && !sr.gw.Shared && cause == nil && !handedOff {
 		keepGatewayForOthers(ctx, profile.Name)
 	}
-	gw.Stop()
-	teardownIfIdle(runner, nm, profile.Name)
+	sr.gw.Stop()
+	teardownIfIdle(runner, sr.nm, profile.Name)
 
 	blocked.summary(profile.Name)
 	if cause != nil {
@@ -235,9 +275,15 @@ func keepGatewayForOthers(ctx context.Context, profileName string) {
 // finishSession stops a persistent sandbox when the last session leaves it,
 // unless it was started with --keep-running. Its files are kept.
 func finishSession(runner *container.Runner, profileName, name string, quiet bool) {
+	if supervisorFor(profileName, name) > 0 {
+		if !quiet {
+			fmt.Printf("  %s keeps running in the background, monitored. Enter it again: rig shell %s   Stop it: rig stop %s\n", name, profileName, profileName)
+		}
+		return
+	}
 	if keepRunning(profileName, name) {
 		if !quiet {
-			fmt.Printf("  %s keeps running (--keep-running). It is not monitored until you run 'rig monitor %s'; stop it with 'rig stop %s'.\n", name, profileName, profileName)
+			fmt.Printf("  %s keeps running, unmonitored. Watch it with 'rig monitor %s'; stop it with 'rig stop %s'.\n", name, profileName, profileName)
 		}
 		return
 	}
@@ -254,14 +300,22 @@ func finishSession(runner *container.Runner, profileName, name string, quiet boo
 }
 
 // teardownIfIdle removes the proxy, gateway and networks once no sandbox of
-// the profile is left.
+// the profile is running. They are recreated on the next start.
 func teardownIfIdle(r *container.Runner, nm *container.NetworkManager, profileName string) {
 	if nm == nil {
 		return
 	}
-	if len(r.ListByProfile(context.Background(), profileName)) == 0 {
-		nm.Teardown(context.Background(), profileName)
+	instances := r.ListByProfile(context.Background(), profileName)
+	for _, c := range instances {
+		if c.Running {
+			return
+		}
 	}
+	if len(instances) > 0 {
+		nm.StopServices(context.Background(), profileName)
+		return
+	}
+	nm.Teardown(context.Background(), profileName)
 }
 
 func describeAllowlist(eff config.Effective) string {

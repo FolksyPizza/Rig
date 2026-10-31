@@ -18,6 +18,7 @@ func runCmd() *cobra.Command {
 		from                        string
 		timeout                     time.Duration
 		newInstance, recreate, keep bool
+		detach                      bool
 	)
 	cmd := &cobra.Command{
 		Use:   "run <name> [-- command...]",
@@ -29,10 +30,13 @@ use and rebuilt automatically when the sandbox's settings change.
   rig run work -- claude          run a command instead of a shell
   rig run work --from lockdown    create the sandbox from a template first, if needed
 
-While you are inside, Rig filters the network, watches what happens, and
+  rig run work -d                 run it in the background; enter with 'rig shell work'
+
+While a sandbox runs, Rig filters the network, watches what happens, and
 records it in the audit log ('rig audit work'). When you leave a persistent
 sandbox it is stopped, with its files kept, so nothing runs in it unmonitored.
-Pass --keep-running to leave it up.
+-d (or --keep-running when you leave) keeps it running with a background Rig
+process monitoring it; 'rig stop work' ends it.
 
 A running instance is re-entered and a stopped one restarted; --new starts
 another instance alongside it.`,
@@ -66,6 +70,7 @@ another instance alongside it.`,
 				Timeout:     timeout,
 				Command:     args[1:],
 				KeepRunning: keep,
+				Detach:      detach,
 			})
 		},
 	}
@@ -74,7 +79,8 @@ another instance alongside it.`,
 	f.DurationVar(&timeout, "timeout", 0, "stop the sandbox after this long (e.g. 30m, 2h)")
 	f.BoolVar(&newInstance, "new", false, "start another instance instead of reusing the existing one")
 	f.BoolVar(&recreate, "recreate", false, "replace an instance created from an older image (named volumes are kept)")
-	f.BoolVar(&keep, "keep-running", false, "leave a persistent sandbox running after you exit")
+	f.BoolVarP(&detach, "detach", "d", false, "run in the background, monitored (enter with 'rig shell', stop with 'rig stop')")
+	f.BoolVar(&keep, "keep-running", false, "keep the sandbox running, monitored in the background, after you exit")
 	return cmd
 }
 

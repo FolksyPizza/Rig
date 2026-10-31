@@ -2,6 +2,10 @@
 
 package main
 
+import "syscall"
+
+func detachedProcAttr() *syscall.SysProcAttr { return nil }
+
 func redrawTerminal()      {}
 func setTitle(text string) {}
 func pushTitle()           {}

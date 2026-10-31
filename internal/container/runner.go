@@ -105,6 +105,9 @@ type RunOptions struct {
 	// session ends. Without it, Rig stops the sandbox so nothing runs in it
 	// unmonitored.
 	KeepRunning bool
+	// Detach runs the sandbox in the background, monitored by a background
+	// Rig process, instead of opening a shell.
+	Detach bool
 }
 
 // LaunchSpec is everything needed to create a sandbox container.
@@ -174,6 +177,9 @@ func (r *Runner) Prepare(ctx context.Context, spec LaunchSpec, opts RunOptions) 
 
 	name := r.ContainerName(profile.Name, r.nextInstance(ctx, profile.Name))
 	ephemeral := profile.Persistence == "ephemeral"
+	// A background sandbox needs a main process that outlives any session,
+	// even when it is removed on stop.
+	longLived := !ephemeral || opts.Detach
 
 	env, err := SandboxEnv(spec)
 	if err != nil {
@@ -195,6 +201,7 @@ func (r *Runner) Prepare(ctx context.Context, spec LaunchSpec, opts RunOptions) 
 		name:      name,
 		envFile:   envFile,
 		ephemeral: ephemeral,
+		longLived: longLived,
 		mounts:    mounts,
 		command:   opts.Command,
 	})
@@ -204,7 +211,7 @@ func (r *Runner) Prepare(ctx context.Context, spec LaunchSpec, opts RunOptions) 
 	}
 	cleanup()
 
-	if ephemeral {
+	if !longLived {
 		return &Prepared{Name: name, Fresh: true, attached: true}, nil
 	}
 	if out, err := exec.CommandContext(ctx, r.bin, "start", name).CombinedOutput(); err != nil {
@@ -562,6 +569,7 @@ type createOpts struct {
 	name      string
 	envFile   string
 	ephemeral bool
+	longLived bool // main process is "sleep infinity"; sessions use exec
 	mounts    []MountSpec
 	command   []string
 }
@@ -681,9 +689,10 @@ func (r *Runner) buildCreateArgs(spec LaunchSpec, o createOpts) []string {
 	args = append(args, profile.ImageTag())
 
 	switch {
-	case !o.ephemeral:
-		// A persistent sandbox needs a main process that outlives any one
-		// shell session, so sessions can come and go via exec.
+	case !o.ephemeral || o.longLived:
+		// A persistent or background sandbox needs a main process that
+		// outlives any one shell session, so sessions can come and go via
+		// exec.
 		args = append(args, "sleep", "infinity")
 	case len(o.command) > 0:
 		args = append(args, o.command...)

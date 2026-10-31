@@ -52,6 +52,9 @@ func monitoredState(c container.ContainerInfo) string {
 	if !c.Running {
 		return "-"
 	}
+	if note := backgroundNote(c.Profile, c.Name); note != "" {
+		return note
+	}
 	if pids := otherSessions(c.Profile, c.Name); len(pids) > 0 {
 		return "yes"
 	}

@@ -4,6 +4,7 @@ package main
 
 import (
 	"os"
+	"syscall"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -51,3 +52,7 @@ func popTitle() {
 		os.Stderr.WriteString("\033[23;0t")
 	}
 }
+
+// detachedProcAttr starts a process in its own session, so it outlives the
+// terminal that started it and receives none of its signals.
+func detachedProcAttr() *syscall.SysProcAttr { return &syscall.SysProcAttr{Setsid: true} }
