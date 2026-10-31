@@ -968,8 +968,13 @@ func (r *Runner) ProfileOf(ctx context.Context, containerName string) (string, e
 	return name, nil
 }
 
+// containerExists reports whether a container (not an image, volume or
+// network: Podman's plain inspect matches those too) has this name.
 func (r *Runner) containerExists(ctx context.Context, name string) bool {
-	return exec.CommandContext(ctx, r.bin, "inspect", name).Run() == nil
+	if r.kind == "apple" {
+		return exec.CommandContext(ctx, r.bin, "inspect", name).Run() == nil
+	}
+	return exec.CommandContext(ctx, r.bin, "inspect", "--type", "container", name).Run() == nil
 }
 
 // findReusable returns an existing sandbox for the profile, preferring one
