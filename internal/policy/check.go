@@ -113,6 +113,12 @@ func Check(p *config.Profile) []Finding {
 	if eff.Sudo {
 		add(Medium, "privileges", "The agent has passwordless sudo: it can act as root inside the sandbox and install anything the network allows.")
 	}
+	switch eff.AgentPermissions {
+	case config.PermissionsFull:
+		add(Low, "privileges", "Agents run without approval prompts (agent_permissions: full): they act on whatever they decide, and the sandbox is the only boundary.")
+	case config.PermissionsEdit:
+		add(Info, "privileges", "Agents edit files without asking and ask before other actions (agent_permissions: edit).")
+	}
 	if eff.ReadOnlyRoot {
 		add(Info, "filesystem", "The image is read-only; scratch space and home are separate, and /tmp is %s.", map[bool]string{true: "noexec", false: "executable"}[eff.NoExecTmp])
 	}

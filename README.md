@@ -1,6 +1,8 @@
 # Rig
 
-Run AI coding agents in locked-down sandboxes.
+Run AI coding agents in locked-down sandboxes: Claude Code, Codex, Gemini
+CLI, Pi, OpenCode, Qwen Code, Crush, Aider, Copilot, Grove and more, or your
+own.
 
 Rig builds a container with your agent already installed, runs it as an
 unprivileged user, and puts a default-deny network filter in front of it: the
@@ -10,9 +12,9 @@ is watched and recorded, and a sandbox that tries to send data somewhere it
 shouldn't is stopped.
 
 ```bash
-rig new work          # create a sandbox: Claude Code, standard security
-rig run work          # build it if needed and open a shell inside
-rig check work        # see exactly what it can and cannot reach
+rig new               # guided: pick the agent, security level, folder and resources
+rig run work          # start it and open a shell (-d runs it in the background)
+rig blocked work      # see what Rig blocked, and allow what you need
 ```
 
 ## Why
@@ -33,14 +35,34 @@ and stop the sandbox at the first attempt to break a rule.
 
 ## Install
 
-You need Go 1.25 or later to build, and Docker or Podman to run sandboxes.
+Rig needs Docker or Podman to run sandboxes.
+
+**Without cloning** (Linux and macOS):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/FolksyPizza/Rig/main/install.sh | sh
+rig doctor             # checks your engine and isolation runtimes
+```
+
+The script downloads the latest release for your computer, checks it against
+the release's `SHA256SUMS` and installs it in `~/.local/bin`. If no release
+build is available it builds Rig from source (needs git and Go 1.25+).
+`RIG_VERSION=v0.3.0` picks a release, `RIG_INSTALL_DIR=/usr/local/bin` another
+location. Read the script first if you prefer: it is short.
+
+**From a clone** (needs Go 1.25+):
 
 ```bash
 git clone https://github.com/FolksyPizza/Rig.git
 cd Rig
 make user-install      # installs ~/.local/bin/rig
-rig doctor             # checks your engine and isolation runtimes
+rig doctor
 ```
+
+**Updating:** `rig update` installs the latest release in place (checksum
+verified; `rig update --check` only looks). From a clone, `git pull && make
+user-install`. `rig update work` rebuilds a sandbox with the latest versions
+of its agents.
 
 - **Linux**: Docker or Podman. For the strict and lockdown levels, install
   [gVisor](https://gvisor.dev/docs/user_guide/install/) or
@@ -59,28 +81,52 @@ connect to services on your computer, or reach the cloud metadata address.
 ## Quick start
 
 ```bash
-export ANTHROPIC_API_KEY=sk-ant-...   # or sign in inside the sandbox
-rig new work --mount ~/code/project:/home/sandbox/project:rw
-rig run work
+export OPENAI_API_KEY=...        # or ANTHROPIC_API_KEY, GEMINI_API_KEY, ...; or sign in inside
+cd ~/code/project
+rig new
 ```
 
-Inside, run `claude` (or whichever agent you chose). Leave with `exit`. A
-persistent sandbox is stopped when you leave, with its files kept, so nothing
-runs in it unwatched; `rig run work` picks up where you left off.
+`rig new` asks a few questions, each with a default (press Enter to accept):
+which agent, the security level, whether to share the current folder, what
+the agent may do without asking you, CPU, memory and disk, extra sites to
+allow, sudo, and whether to keep files between runs. Then it offers to start
+the sandbox. Inside, run your agent (`codex`, `claude`, `gemini`, ...); leave
+with `exit`.
 
-API keys are written in profiles as `${VAR}` references and resolved from
-your environment at launch. Claude Code can also sign in with your Claude
-account from inside the sandbox (open the link it prints, then paste the code
-back); a persistent sandbox keeps the login.
-
-Pick another agent, level or template:
+The same with flags, for scripts:
 
 ```bash
-rig new work --agent codex --level strict
-rig new api --agent opencode --allow docs.example.com --preset go
-rig new safe --from lockdown
-rig templates
+rig new work --agent codex --mount .:/home/sandbox/project:rw
+rig new work --agent claude-code --level strict --cpu 4 --memory 8g --disk 20g
+rig new work --agent gemini-cli --permissions full     # no approval prompts inside
+rig new safe --from lockdown --agent opencode
 ```
+
+Without `--agent`, Rig uses the agent whose API key it finds. API keys are
+written in profiles as `${VAR}` references and resolved from your
+environment at launch, never stored. Claude Code and Codex can also sign in
+with your account from inside the sandbox; a persistent sandbox keeps the
+login.
+
+### Day to day
+
+```bash
+rig run work                  # start it and open a shell; leaving stops it (files kept)
+rig run work -d               # run it in the background, still monitored
+rig shell work                # enter a running sandbox (another terminal, or after -d)
+rig stop work                 # stop it
+rig set work cpu=4 memory=8g  # change settings ('rig set work' lists them all)
+rig blocked work              # sites Rig refused; pick which to allow
+rig allow work docs.rs        # allow a site; a running sandbox gets it at once
+rig update work               # newest agent versions
+```
+
+When Rig blocks a connection it prints one line naming the site and the
+command that would allow it, and your shell or agent carries on: there is no
+need to press Ctrl-C. When you leave, Rig lists what it blocked during the
+session. If Rig stops a sandbox for a serious violation, an interactive
+session offers to restart it, show what happened, or (for an ordinary block)
+allow the site and restart.
 
 ## Security levels
 
@@ -98,6 +144,7 @@ standard, is refused.
 | Monitoring | observe | stops clear attacks | stops after 3 blocked connections a minute | stops at the first blocked connection |
 | Upload limit per connection | none | none | 256 MB | 64 MB |
 | Agents | as installed | telemetry and auto-update off | npm install scripts off | web tools and permission bypass off; pip wheels only; programs from outside the image stop the sandbox |
+| Agent permissions | any | any | any | ask or edit (no `full`) |
 | Lifetime | any | any | any | ephemeral only |
 
 `rig levels` prints a summary. Every level runs the agent as user `sandbox`
@@ -247,13 +294,16 @@ rig audit work                 # what happened: connections, tool calls, process
 rig audit work --flagged       # only what Rig flagged or stopped
 rig audit work -f              # follow new events
 rig monitor work               # live view of a running sandbox
-rig ps                         # shows whether each running sandbox is monitored
+rig blocked work               # sites refused for not being on the allowlist
+rig ps                         # shows how each running sandbox is monitored
 ```
 
 The audit log is kept on your machine (`rig audit work --path`), outside every
-sandbox, so nothing inside can change it. Monitoring runs inside the `rig`
-process that started the sandbox. For a sandbox left running with
-`--keep-running`, `rig monitor` takes over.
+sandbox, so nothing inside can change it. Monitoring runs in a Rig process:
+the one that opened your session, or, for a sandbox started with `rig run -d`
+(or left with `--keep-running`), a background Rig process that also owns the
+sandbox's gateway. Nothing runs in a sandbox unwatched: stopping the
+background process stops the sandbox, and `rig stop` ends both.
 
 ### AI monitor
 
@@ -278,7 +328,7 @@ are enforced.
 | ID | Agent | Keys |
 |---|---|---|
 | `claude-code` | Claude Code | `ANTHROPIC_API_KEY` or account sign-in |
-| `codex` | Codex | `OPENAI_API_KEY` |
+| `codex` | Codex | `OPENAI_API_KEY` or ChatGPT sign-in |
 | `gemini-cli` | Gemini CLI | `GEMINI_API_KEY` |
 | `pi` | Pi | Anthropic, OpenAI or Gemini keys |
 | `opencode` | OpenCode | Anthropic or OpenAI keys |
@@ -296,10 +346,33 @@ sandbox (`--agent claude-code --agent codex`). Agents that work with many
 providers get the domains of the keys you configure, and a `*_BASE_URL`
 pointing at another provider or a local model is followed automatically.
 
-To add your own, put a definition in `~/.config/rig/agents/<id>.yaml` (`rig
-agents` prints the path). These files hold commands that run as root during
-the image build, so they are local configuration only: a shared profile can
-name a custom agent but never define one.
+### What agents may do without asking
+
+`--permissions` (or `rig set work permissions=...`, or
+`security.agent_permissions`) sets how much the agents ask you first:
+
+| Mode | Meaning |
+|---|---|
+| `ask` (default) | each agent's own default: it asks before acting |
+| `edit` | file edits without asking; it still asks before running commands |
+| `full` | no approval prompts; the sandbox is the boundary (not allowed at lockdown) |
+
+Rig applies each agent's own documented setting: Claude Code
+`--permission-mode acceptEdits` / `bypassPermissions`; Codex
+`--ask-for-approval untrusted` / `--dangerously-bypass-approvals-and-sandbox`
+(Codex's own command sandbox cannot run inside a container, so Rig's is the
+boundary); Gemini CLI and Qwen Code `--approval-mode` / `--yolo`; Crush
+`--yolo`; Aider `--yes-always`; Copilot `--allow-tool write` /
+`--allow-all-tools`; OpenCode through its config file. Pi never asks. The
+flags are added by a small wrapper in `/etc/rig/bin`, read-only to the agent.
+`rig check` reports the mode.
+
+### Your own agents
+
+Put a definition in `~/.config/rig/agents/<id>.yaml` (`rig agents` prints the
+path). These files hold commands that run as root during the image build, so
+they are local configuration only: a shared profile can name a custom agent
+but never define one.
 
 ```yaml
 id: mytool
@@ -310,63 +383,69 @@ node: "22"
 command: my-tool
 domains: [api.mytool.example]
 env: [MYTOOL_API_KEY]
+permissions:                 # optional: flags for Rig's permission modes
+  edit: [--auto-edit]
+  full: [--yolo]
 ```
 
 ## Templates
 
-`rig templates` lists them; `rig new <name> --from <template>` uses one.
+`rig templates` lists them; `rig new <name> --from <template> --agent <id>`
+uses one. Most work with any agent.
 
 | Template | |
 |---|---|
-| `standard` | Claude Code with an egress allowlist (the default) |
-| `claude-strict` | Read-only image, HTTPS only, ephemeral |
+| `standard` | Egress allowlist, exfiltration sites blocked (the default) |
+| `strict` | Read-only image, HTTPS only, no sudo, ephemeral |
 | `lockdown` | Model API only, gVisor or VM required, ephemeral |
-| `claude-dev` | Open level: unrestricted network and sudo, for trusted work |
-| `codex`, `gemini`, `pi`, `opencode`, `qwen-code`, `grove` | Other agents with an allowlist |
-| `local-model` | Qwen Code on your local Ollama, no internet at all |
-| `blender` | Claude Code with Blender over MCP, code execution blocked |
-| `multi-agent` | Claude Code, Gemini CLI and Codex side by side |
+| `dev` | Open level: unrestricted network, sudo, no approval prompts, for trusted work |
 | `airgapped` | No network |
 | `minimal` | Small and ephemeral |
+| `blender` | Blender over MCP, its code-execution tool blocked |
+| `local-model` | Qwen Code on your local Ollama, no internet at all |
+| `multi-agent` | Claude Code, Codex and Gemini CLI side by side |
 | `hermes-research` | Hermes Agent with open web access (open level) |
+
+The older agent-named templates (`codex`, `gemini`, `pi`, `opencode`,
+`qwen-code`, `grove`, `claude-strict`, `claude-dev`) still work: each is a
+template above with that agent.
 
 ## Commands
 
-```text
-Getting started
-  rig new <name>            create a sandbox (--agent, --level, --from, --mount, --allow, --port, --sudo, ...)
-  rig run <name>            start it and open a shell; 'rig run <name> -- <cmd>' runs a command
-  rig templates             ready-made setups
-  rig agents                installable agents
-  rig levels                the security levels
+`rig`, `rig help` and `rig --help` all show this list; `rig help <command>`
+explains one command and its options.
 
-Security
-  rig check <name>          what it can and cannot do, with risks ranked
-  rig doctor [--deep]       check this computer's engine, runtimes and isolation
-  rig monitor <name>        watch a running sandbox live
-  rig audit <name>          what a sandbox did
+```text
+Use a sandbox
+  rig new [name]              create one: guided in a terminal, or with flags
+  rig run <name>              start it and open a shell (-d background, -- <cmd> run a command)
+  rig shell <name>            enter a running sandbox
+  rig exec <name> -- <cmd>    run a command in it
+  rig stop <name>             stop it, keeping its files
+  rig ps / rig list           running containers / saved sandboxes
 
 Configure
-  rig edit <name>           edit the YAML in $EDITOR (validated on save)
-  rig allow <name> <domain> allow a domain (--remove to undo)
-  rig add <name> <pkg>      install apt packages (--npm, --pip) on the next run
-  rig show <name>           print the settings (--dockerfile for the image recipe)
-  rig presets               named groups of domains
-  rig export / rig import   share a sandbox as YAML (imports are treated as untrusted)
-  rig list                  saved sandboxes
+  rig set <name> key=value    cpu, memory, disk, pids, level, permissions, network, timeout, ...
+  rig allow <name> <domain>   allow a site (--remove to undo); applies to a running sandbox
+  rig blocked <name>          sites Rig refused, and pick which to allow
+  rig add <name> <pkg>        install apt packages (--npm, --pip)
+  rig edit / rig show         the full YAML
+  rig templates, agents, levels, presets, export, import
+
+Watch and check
+  rig check <name>            what it can and cannot do, with risks ranked
+  rig monitor <name>          live view
+  rig audit <name>            what it did
+  rig doctor [--deep]         this computer's engine, runtimes and isolation
 
 Manage
-  rig ps                    containers, and whether each is monitored
-  rig shell <name>          another shell in a sandbox
-  rig exec <name> -- <cmd>  run a command in a sandbox
-  rig stop <name>           stop it, keeping its files
-  rig rm <name>             remove its containers (--volumes, --all to delete everything)
-  rig build <name>          build the image ahead of time (--no-cache for fresh agents)
-  rig logs, cp, stats, top, diff, pause, unpause, commit, rename
+  rig update [name]           update Rig itself, or a sandbox's agents
+  rig rm <name>               remove its containers (--all deletes everything)
+  rig build, logs, cp, stats, top, diff, pause, unpause, commit, rename, version
 ```
 
-`rig help <command>` explains each one. Every command that takes a sandbox
-also accepts a container name from `rig ps`, such as `rig-work-2`.
+Every command that takes a sandbox also accepts a container name from
+`rig ps`, such as `rig-work-2`.
 
 ## Profiles
 
@@ -379,6 +458,7 @@ name: work
 security:
   level: strict                 # open | standard | strict | lockdown
   isolation: auto               # auto | container | gvisor | vm
+  agent_permissions: edit       # ask | edit | full
 agents:
   - id: claude-code
     env:
@@ -414,6 +494,8 @@ storage:
   volumes:
     - {name: workspace, target: /home/sandbox/workspace}
 persistence: persistent         # persistent | ephemeral
+metadata:
+  timeout: 2h                   # stop automatically after this long
 ```
 
 ### Environment variables
